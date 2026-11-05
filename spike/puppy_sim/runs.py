@@ -23,10 +23,12 @@ TAIL_S = 2.0  # and ends this long after the goal's terminal status
 NEAR_USER_M = 0.35  # arm (past joint 2) closer than this to the person: NEAR_USER
 FINAL_APPROACH_M = 0.11  # tool within this of the grasp pose: the final approach (STANDOFF 0.10 + blend)
 APPROACH_MESSAGE = "view -> pre-grasp -> grasp, one motion"
+DRY_RUN_MESSAGE = "dry run: planning"  # grasp.py's dry run: it plans the approach and the raise, nothing moves
 HOME_JOINTS = (0.067, -1.8971, -3.137, -2.2691, -0.211, -0.6831, 1.725)  # grab_container's home_joints
 
 # (phase, message) -> zone. Unknown pairs are PRECISION (fail-safe). The geometric rules add the
-# final approach (PRECISION) and NEAR_USER on top.
+# final approach (PRECISION) and NEAR_USER on top. The table knows the recorded runs' pairs and
+# today's grasp.py, which reports the approach under its own phase.
 ZONE_TABLES = {
     "grab_container": {
         ("idle", ""): FREE,  # before the goal: the arm rests at home
@@ -35,14 +37,24 @@ ZONE_TABLES = {
         ("view", ""): FREE,
         ("detect", ""): PRECISION,  # wrist-camera perception hold: frames must agree to 5 mm
         ("grasp", "opening"): FREE,
-        ("grasp", APPROACH_MESSAGE): FREE,  # free until the final approach (geometric rule)
+        ("grasp", APPROACH_MESSAGE): FREE,  # the recorded runs: free until the final approach (geometric rule)
+        ("approach", APPROACH_MESSAGE): FREE,  # grasp.py today: the same approach
         ("grasp", "closing"): PRECISION,
         ("raise", ""): PRECISION,  # lifting it clear of the counter
+        ("approach", DRY_RUN_MESSAGE): PRECISION,  # a dry run moves nothing, so neither does Puppy Mode
+        ("raise", DRY_RUN_MESSAGE): PRECISION,
         ("done", ""): FREE,  # holding it, goal succeeded
         ("aborted", ""): FREE,  # the arm holds where it stopped
     },
 }
-SHORT_NAMES = {("grasp", "opening"): "open", ("grasp", APPROACH_MESSAGE): "approach", ("grasp", "closing"): "close"}
+SHORT_NAMES = {
+    ("grasp", "opening"): "open",
+    ("grasp", APPROACH_MESSAGE): "approach",
+    ("approach", APPROACH_MESSAGE): "approach",
+    ("grasp", "closing"): "close",
+    ("approach", DRY_RUN_MESSAGE): "plan (dry run)",
+    ("raise", DRY_RUN_MESSAGE): "plan the raise (dry run)",
+}
 
 
 @dataclass(frozen=True)

@@ -13,6 +13,8 @@ BUMP_PEAK_CURVE = 4.0 * MIN_JERK_PEAK_CURVE  # max of |d2/du2 bump(u)|
 NOISE_KNOTS_PER_CYCLE = 1.0  # random knots per period of the noise's corner frequency
 WOBBLE_FADE_SHARE = 0.35  # a wobble fades to rest over this last share of its settle time
 WOBBLE_KICK_PERIODS = 0.5  # a wobble's spring is kicked by a bump this many natural periods long
+SINE_EASE_PERIODS = 1.0  # a windowed sine eases in and out over this many periods (its peak acceleration:
+# 1.11 x a pure sine's; over half a period it would be 1.58 x)
 
 
 def min_jerk(u):
@@ -117,14 +119,19 @@ def bumps(t, t0, count, period_s):
     return np.where((u >= 0.0) & (u < count), bump(u - np.floor(u)), 0.0)
 
 
-def windowed_sine(t, t0, cycles, freq_hz, decay_s=np.inf):
-    """sin over `cycles` periods from t0, eased in over its first half period and out over its
-    last (so it starts and ends at rest), its amplitude decaying as exp(-(t - t0) / decay_s)."""
+def sine_envelope(t, t0, cycles, freq_hz, decay_s=np.inf):
+    """windowed_sine's envelope: eased in over the first SINE_EASE_PERIODS from t0 and out over the
+    last of `cycles` periods, decaying as exp(-(t - t0) / decay_s)."""
     tau = np.asarray(t, dtype=float) - t0
-    half = 0.5 / freq_hz
+    ease = min(SINE_EASE_PERIODS, cycles / 2.0) / freq_hz
     end = cycles / freq_hz
-    window = ramp(tau, 0.0, half) - ramp(tau, end - half, end)
-    return np.sin(2.0 * np.pi * freq_hz * tau) * window * np.exp(-np.maximum(tau, 0.0) / decay_s)
+    return (ramp(tau, 0.0, ease) - ramp(tau, end - ease, end)) * np.exp(-np.maximum(tau, 0.0) / decay_s)
+
+
+def windowed_sine(t, t0, cycles, freq_hz, decay_s=np.inf):
+    """sin over `cycles` periods from t0 under sine_envelope (so it starts and ends at rest)."""
+    tau = np.asarray(t, dtype=float) - t0
+    return np.sin(2.0 * np.pi * freq_hz * tau) * sine_envelope(t, t0, cycles, freq_hz, decay_s)
 
 
 def wobble(t, t0, freq_hz, damping, settle_s):

@@ -1,7 +1,8 @@
-"""Safety checks on clip tracks, independent of how they were composed: the caps, precision
-identity, the time-warp (against the functional track it warped, not the warped copy compose was
-handed), clearances to the user and the obstacles (with the composite gripper), the gripper rule
-and continuity. Plus the model's FK against the robot's recorded end-effector poses.
+"""Safety checks on clip tracks, independent of how they were composed: the zone-tiered caps of the
+track's preset, precision identity, the time-warp (against the functional track it warped, not the
+warped copy compose was handed) and the time it adds, clearances to the user and the obstacles
+(with the composite gripper), the gripper rule and continuity. Plus the model's FK against the
+robot's recorded end-effector poses.
 """
 
 from dataclasses import dataclass
@@ -11,13 +12,13 @@ from scipy.spatial.transform import Rotation
 
 from . import layer, scene
 from .kin import ARM_PARTS, VEL_LIMITS
-from .timeline import DT, NEAR_USER, PRECISION, interp_rows, speed
+from .timeline import BOUNDARY, DT, FREE, NEAR_USER, PRECISION, STOP_RAD_S, interp_rows, joint_speed, speed
 
 CONTINUITY_TOL = 1.05  # one sample's step may be this much over URDF speed x DT (difference noise)
+CAP_TOL = 1e-9
 DTAU_TOL = 1e-9
 PATH_TOL_RAD = 1e-9  # the functional track under the composite vs its source's path at tau
 SAMPLE_SNAP = 1e-6  # a tau this close to a source sample's time (in samples) is that sample
-WARP_ACCEL_CAP = layer.EXPR_JOINT_ACCEL  # rad/s^2 a pause or slow-in may add to the functional motion
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,16 @@ def _ratio_check(name, values, limit, fmt="{:.2f}"):
     return Check(name, worst <= limit, f"{fmt.format(worst)}/{fmt.format(limit)}")
 
 
+def _cap_check(name, value, cap, where):
+    """value (N, k) against cap (N, k) on the samples `where`: the worst sample's value/cap, '-'
+    when there are none."""
+    if not where.any():
+        return Check(name, True, "-")
+    ratio = value[where] / cap[where]
+    i, j = np.unravel_index(int(np.argmax(ratio)), ratio.shape)
+    return Check(name, bool(ratio[i, j] <= 1.0 + CAP_TOL), f"{value[where][i, j]:.2f}/{cap[where][i, j]:.2f}")
+
+
 def check_track(track, kin):
     """All checks for a track; the expressive ones only for a composed (Puppy Mode) track."""
     out = _robot_checks(track, kin)
@@ -44,6 +55,8 @@ def check_track(track, kin):
         out += _path_checks(track)
         out += _clearance_checks(track, kin)
         out.append(_gripper_check(track))
+        out.append(_tier_check(track))
+        out += _time_checks(track)
     return out
 
 
@@ -67,16 +80,25 @@ def _robot_checks(track, kin):
 
 
 def _expressive_checks(track, kin):
-    """The expressive part alone: joint speed, joint acceleration, head speed, gripper speed."""
+    """The expressive part alone under the caps of the track's preset, tier by tier (layer.cap_tier):
+    joint speed, joint acceleration and head speed where FREE's caps apply ('free ...') and where
+    the gentle ones do ('near ...': NEAR_USER and the ramps into it or into PRECISION); and the
+    gripper speed."""
+    caps = track.caps or layer.DEFAULT_CAPS
+    limits = layer.sample_caps(track.zone, caps)
     expr = track.q - track.func.q
-    v = np.gradient(expr, DT, axis=0)
-    a = np.gradient(v, DT, axis=0)
-    return [
-        _ratio_check("expr speed", np.abs(v), layer.EXPR_JOINT_SPEED),
-        _ratio_check("expr accel", np.abs(a), layer.EXPR_JOINT_ACCEL),
-        _ratio_check("head speed", layer.expressive_head_speed(kin, track.func, track.q), layer.EXPR_HEAD_SPEED),
-        _ratio_check("grip speed", layer.gripper_rate(track.grip - track.func.grip), layer.EXPR_GRIP_SPEED),
-    ]
+    v = np.abs(np.gradient(expr, DT, axis=0))
+    a = np.abs(np.gradient(np.gradient(expr, DT, axis=0), DT, axis=0))
+    head = layer.expressive_head_speed(kin, track.func, track.q)[:, None]
+    out = [Check("caps", True, caps)]
+    for tier, where in (("free", limits.tier == FREE), ("near", limits.tier != FREE)):
+        out += [
+            _cap_check(f"{tier} speed", v, limits.joint_speed, where),
+            _cap_check(f"{tier} accel", a, limits.joint_accel, where),
+            _cap_check(f"{tier} head", head, limits.head_speed[:, None], where),
+        ]
+    out.append(_ratio_check("grip speed", layer.gripper_rate(track.grip - track.func.grip), layer.EXPR_GRIP_SPEED))
+    return out
 
 
 def _precision_checks(track):
@@ -95,7 +117,8 @@ def _precision_checks(track):
 def _path_checks(track):
     """For a time-warped track (its .func has a source): the functional track under the composite
     is the source's path at tau, every sample at a precise source sample is PRECISION, and the
-    warp's pauses and slow-ins add at most WARP_ACCEL_CAP (|dq/dtau| |d2tau/dt2|) to the motion."""
+    warp's pauses and slow-ins add (|dq/dtau| |d2tau/dt2|) at most the default preset's joint
+    acceleration cap of each sample's tier to the motion."""
     func, src = track.func, track.func.source
     if src is None:
         return []
@@ -106,10 +129,47 @@ def _path_checks(track):
     precise = (src.zone[lo] == PRECISION) | (src.zone[hi] == PRECISION)
     covered = bool(np.all(track.zone[precise] == PRECISION))
     v = interp_rows(np.gradient(src.q, DT, axis=0), u)
-    added = (np.abs(v) * np.abs(np.gradient(np.gradient(func.tau, DT), DT))[:, None]).max(axis=1)
+    added = np.abs(v) * np.abs(np.gradient(np.gradient(func.tau, DT), DT))[:, None]
     ok = off <= PATH_TOL_RAD and covered
     detail = "" if ok else f"{off:.1e} rad off the source path; precise samples {'kept' if covered else 'NOT kept'}"
-    return [Check("path", ok, "same" if ok else "OFF", detail), _ratio_check("warp accel", added, WARP_ACCEL_CAP)]
+    accel_cap = layer.sample_caps(track.zone).joint_accel
+    return [
+        Check("path", ok, "same" if ok else "OFF", detail),
+        _cap_check("warp accel", added, accel_cap, np.ones(track.n, dtype=bool)),
+    ]
+
+
+def _tier_check(track):
+    """What a composed track does to the functional moves: 'boundary' when every moving sample of
+    the source (a joint at STOP_RAD_S or faster) plays exactly as recorded, at dtau/dt = 1 on both
+    sides and with no expressive offset; else how many it retimes and how many it layers onto. A
+    track that promises the boundary tier (track.tier) fails if it does either."""
+    func = track.func
+    src = func.source if func.source is not None else func
+    u = np.interp(func.tau, src.tau, np.arange(src.n, dtype=float))
+    moving = joint_speed(src) >= STOP_RAD_S
+    on_move = moving[np.floor(u).astype(int)] | moving[np.ceil(u).astype(int)]
+    step = np.abs(np.diff(u) - 1.0) <= SAMPLE_SNAP
+    steady = np.append(step, True) & np.insert(step, 0, True)
+    retimed = int(np.sum(on_move & ~steady))
+    layered = int(np.sum(on_move & np.any(track.q != func.q, axis=1)))
+    shown = "boundary" if not (retimed or layered) else f"moves: {retimed} retimed, {layered} layered"
+    promised = track.tier == BOUNDARY
+    return Check(
+        "tier", not (promised and (retimed or layered)), shown, f"promised: {track.tier}" if track.tier else ""
+    )
+
+
+def _time_checks(track):
+    """For a time-warped track: the time its pauses add to the plain task, within its budget when it
+    has one (a directed track)."""
+    if track.func.source is None:
+        return []
+    added = track.duration - track.plain_duration
+    budget = track.budget
+    ok = budget is None or added <= budget.seconds + CAP_TOL
+    limit = f"/{budget.seconds:.1f} {budget.name}" if budget is not None else ""
+    return [Check("added s", ok, f"+{added:.1f}{limit}")]
 
 
 def _clearance_checks(track, kin):

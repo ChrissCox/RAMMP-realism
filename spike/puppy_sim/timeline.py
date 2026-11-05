@@ -17,7 +17,9 @@ import numpy as np
 from . import curves
 
 DT = 0.02  # s: RAMMP's trajectory rate, 50 Hz
+STOP_RAD_S = 0.02  # the arm is stopped when every joint is slower than this (between moves)
 FREE, NEAR_USER, PRECISION = 0, 1, 2
+BOUNDARY, IN_MOTION = "boundary", "in_motion"  # beat tiers: between moves only, or riding on them
 ZONE_NAMES = {FREE: "FREE", NEAR_USER: "NEAR_USER", PRECISION: "PRECISION"}
 GRIP_TO_KNUCKLE_RAD = 0.8  # Robotiq knuckle angle (rad) at grip 1.0 (closed)
 
@@ -31,6 +33,14 @@ class Label:
     t1: float
 
 
+@dataclass(frozen=True)
+class Budget:
+    """The most time (s) a director's pauses may add to one task."""
+
+    name: str
+    seconds: float
+
+
 @dataclass
 class Track:
     """A sampled arm motion on the DT clock (output time t = k * DT).
@@ -39,8 +49,9 @@ class Track:
     held: (N,) bool, the container rides in the gripper; tau: (N,) functional time of each sample.
     A resampled (time-warped) track carries `source`, the functional track it follows (tau is that
     track's time), so checks can hold it to that path. A composed (Puppy Mode) track also carries
-    `func` (the warped functional track on the same clock), `gain` (N,) and a `log` of what the
-    composition changed."""
+    `func` (the warped functional track on the same clock), `gain` (N,), `caps` (the cap preset it
+    was fitted to) and a `log` of what the composition changed; a directed one its time `budget` and
+    the `tier` it promises (director.BOUNDARY: every functional move plays exactly as recorded)."""
 
     q: np.ndarray
     grip: np.ndarray
@@ -54,6 +65,9 @@ class Track:
     log: list = field(default_factory=list)
     name: str = ""
     source: "Track | None" = None
+    caps: str = ""
+    budget: Budget | None = None
+    tier: str = ""
 
     @property
     def n(self):
@@ -66,6 +80,12 @@ class Track:
     @property
     def duration(self):
         return (self.n - 1) * DT
+
+    @property
+    def plain_duration(self):
+        """The duration of the functional motion before any time-warp (the plain task's)."""
+        func = self.func if self.func is not None else self
+        return func.source.duration if func.source is not None else func.duration
 
     def beat_at(self, t):
         """The last beat covering time t, or None."""
@@ -267,17 +287,12 @@ def joint_speed(track):
     return np.abs(np.gradient(track.q, DT, axis=0)).max(axis=1)
 
 
-def quiet_time(track, t_lo, t_hi):
-    """The time in [t_lo, t_hi] where the joints move slowest: a good place for a hold."""
-    i0, i1 = int(round(t_lo / DT)), int(round(t_hi / DT)) + 1
-    return (i0 + int(np.argmin(joint_speed(track)[i0:i1]))) * DT
-
-
 def hold_ramp_s(track, at, accel_cap, min_ramp_s):
-    """A hold ramp long enough that easing to a stop at `at` adds at most accel_cap (rad/s^2):
-    stopping a joint moving at v over a raised-cosine ramp R adds up to v * pi / (2 R)."""
-    v = joint_speed(track)[min(int(round(at / DT)), track.n - 1)]
-    return max(min_ramp_s, float(v) * np.pi / (2.0 * accel_cap))
+    """A hold ramp long enough that easing to a stop at `at` adds at most accel_cap (rad/s^2, one
+    value or one per joint): stopping a joint moving at v over a raised-cosine ramp R adds up to
+    v * pi / (2 R)."""
+    v = np.abs(np.gradient(track.q, DT, axis=0))[min(int(round(at / DT)), track.n - 1)]
+    return max(min_ramp_s, float(np.max(v * np.pi / (2.0 * np.asarray(accel_cap, dtype=float)))))
 
 
 def scripted_track(q, grip, zone=FREE, name="move"):

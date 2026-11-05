@@ -5,6 +5,7 @@ python -m puppy_sim render <clips|all> [--fast]   media/<clip>.mp4, .gif, _sheet
                                                   (--fast: half size, no GIF, media/_work/fast/)
 python -m puppy_sim check <clips|all>             safety checks; exits 1 on a violation
 python -m puppy_sim sheet <clips|all>             just the contact sheets (quick look)
+python -m puppy_sim peaks <clips|all>             media/<clip>_peaks.png and each beat's legibility
 """
 
 import argparse
@@ -13,7 +14,7 @@ import sys
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
-from . import checks, render, runs, scene
+from . import checks, envelope, render, runs, scene
 from .clips import registry, select
 
 MAX_WORKERS = 6  # clips render in parallel processes, each with its own GL context
@@ -29,7 +30,7 @@ def _parallel(fn, names):
 
 def cmd_list(_args):
     for clip in registry().values():
-        print(f"{clip.name:20s} {clip.camera:6s} {clip.title}: {clip.subtitle}")
+        print(f"{clip.name:20s} {clip.camera:12s} {clip.title}: {clip.subtitle}")
 
 
 def cmd_render(args):
@@ -46,6 +47,13 @@ def cmd_sheet(args):
         print(f"{name:20s} {path}")
 
 
+def cmd_peaks(args):
+    clips = select(args.clips)
+    for clip, (name, path, rows) in zip(clips, _parallel(render.peaks_named, [c.name for c in clips])):
+        print(f"{name}: {path}  (on-screen travel in the '{clip.camera}' camera at 1280x720)")
+        print(render.format_legibility(rows))
+
+
 def cmd_check(args):
     k = scene.build().kin()
     for name in sorted(p.stem for p in runs.RUNS_DIR.glob("*.json")):
@@ -54,6 +62,8 @@ def cmd_check(args):
             f"FK vs /ee_state {name}: arm_end_effector_link in arm_mount, "
             f"max {pos_max * 1000:.2f} mm (mean {pos_mean * 1000:.3f}), max {rot_max:.3f} deg"
         )
+    for line in envelope.summary():
+        print(line)
     rows = [row for result in _parallel(checks.check_named, [c.name for c in select(args.clips)]) for row in result]
     print(checks.format_table([r[:4] for r in rows]))
     for name, label, _, results, log in rows:
@@ -73,14 +83,15 @@ def main(argv=None):
         ("render", "render clips to media/"),
         ("check", "run the safety checks"),
         ("sheet", "render just the contact sheets"),
+        ("peaks", "per-beat peak frames and legibility"),
     ):
         p = sub.add_parser(name, help=text)
         p.add_argument("clips", nargs="*", default=["all"])
         if name == "render":
             p.add_argument("--fast", action="store_true", help="half size, no GIF, into media/_work/fast/")
     args = parser.parse_args(argv)
-    handler = {"list": cmd_list, "render": cmd_render, "check": cmd_check, "sheet": cmd_sheet}[args.cmd]
-    return handler(args) or 0
+    handler = {"list": cmd_list, "render": cmd_render, "check": cmd_check, "sheet": cmd_sheet, "peaks": cmd_peaks}
+    return handler[args.cmd](args) or 0
 
 
 if __name__ == "__main__":

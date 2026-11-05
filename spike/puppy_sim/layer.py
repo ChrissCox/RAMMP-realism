@@ -3,38 +3,129 @@
 The functional track comes in already time-warped (timeline.warp). Behaviors give Contributions:
 head offsets (turned into joint offsets by DLS at the functional posture), joint offsets (expressive
 base motions) and gripper offsets. compose() sums them, applies the zone gain and the near-user
-projection, fits the caps, and returns the composed Track (with .func, .gain and .log). The
+projection, fits the caps, and returns the composed Track (with .func, .gain, .caps and .log). The
 guarantees, each checked by checks.py:
 
 - PRECISION: the gain is exactly 0 and q is copied from the functional track (bit-identical).
 - Gains ramp (raised cosine over GAIN_RAMP_S) and reach a zone's level before its first sample.
 - NEAR_USER: gain 0.35, and no offset component that would bring an arm part closer to the person.
-- Caps: the expressive part stays under EXPR_* (the gripper offset under the 2F-85's speed); the
-  composite under the URDF velocity limits, the joint ranges and RAMMP's guards; and every arm
-  part (the fingers as composed) above its clearance floor (person: min of
-  its functional clearance and 0.35 m, less 5 mm; obstacles: min of its functional clearance and
-  3 cm). A behavior that would break one scales its own amplitude down (logged, the same factor
-  for the whole behavior, so the motion stays smooth); the functional motion is never changed.
+- Caps, tiered by zone (CAP_PRESETS): in FREE the expressive part stays inside the envelope the
+  task's own motions already use (envelope.py); near the person it is gentler. Each sample takes the
+  caps of the most restrictive zone within a gain ramp's reach (cap_tier), so a ramp into NEAR_USER
+  or PRECISION is already under the gentle caps. The gripper offset stays under the 2F-85's speed;
+  the composite under the URDF velocity limits, the joint ranges and RAMMP's guards; and every arm
+  part (the fingers as composed) above its clearance floor (person: min of its functional clearance
+  and 0.35 m, less 5 mm; obstacles: min of its functional clearance and 3 cm). A behavior that would
+  break one scales its own amplitude down (logged, the same factor for the whole behavior, so the
+  motion stays smooth); the functional motion is never changed.
 """
 
 from dataclasses import dataclass, field
 
 import numpy as np
+from scipy.ndimage import maximum_filter1d
 
 from . import curves
 from .kin import ARM_PARTS, GUARD_LIMITS, VEL_LIMITS
 from .runs import NEAR_USER_M
-from .timeline import DT, FREE, NEAR_USER, PRECISION, Track
+from .timeline import DT, FREE, NEAR_USER, PRECISION, ZONE_NAMES, Track
 
 GAINS = {FREE: 1.0, NEAR_USER: 0.35, PRECISION: 0.0}
 GRIP_GAINS = {FREE: 1.0, NEAR_USER: 0.0, PRECISION: 0.0}  # and 0 while the gripper holds something
 GAIN_RAMP_S = 0.3
 GAIN_GUARD_SAMPLES = 1  # a ramp down ends this many samples before the lower zone (never inside it)
-EXPR_JOINT_SPEED = 0.85  # rad/s per joint, the expressive part alone (RAMMP arm.JOINT_SPEED)
-EXPR_HEAD_SPEED = 0.16  # m/s at the head, the expressive part alone (RAMMP arm.CART_SPEED)
-EXPR_JOINT_ACCEL = 3.0  # rad/s^2 per joint, the expressive part alone (assumed)
 EXPR_GRIP_SPEED = 0.150 / 0.085  # strokes/s, the gripper offset alone: the 2F-85's 150 mm/s over 85 mm
 HEAD_SPEED_SITES = ("eye", "tool")  # the head's speed is the faster of these points
+
+# The expressive part's caps. FREE: inside the envelope RAMMP's own task motions use in free space
+# (envelope.py measures it from the recorded runs; a test holds these under it).
+TASK_JOINT_SPEED = (0.36, 1.12, 0.59, 0.64, 0.97, 0.87, 0.97)  # rad/s: the task's own peak per joint, rounded down
+FREE_JOINT_SPEED = 0.85  # rad/s per joint (RAMMP arm.JOINT_SPEED), and no faster than the task moves it
+FREE_JOINT_ACCEL = 3.0  # rad/s^2 per joint (about the task's own peak, 3.2 on joint 2)
+FREE_HEAD_SPEED = 0.40  # m/s at the eye and tool points (the task's own peak tool speed, 0.40)
+# NEAR_USER (and the gain ramps into it or into PRECISION): gentler near the person
+NEAR_JOINT_SPEED = 0.5  # rad/s per joint (and no faster than the task moves it)
+NEAR_JOINT_ACCEL = 1.5  # rad/s^2 per joint
+NEAR_HEAD_SPEED = 0.16  # m/s (RAMMP arm.CART_SPEED)
+# 'snappy': a comparison preset only, never the default: quicker wrist wags in FREE
+SNAPPY_WRIST_ACCEL = 9.0  # rad/s^2 on joints 5-7
+WRIST_JOINTS = slice(4, 7)
+DEFAULT_CAPS = "default"
+
+
+@dataclass(frozen=True)
+class Caps:
+    """The expressive part's limits in one zone: per joint speed (rad/s) and acceleration
+    (rad/s^2), each (7,), and the head's speed (m/s, at HEAD_SPEED_SITES)."""
+
+    joint_speed: tuple
+    joint_accel: tuple
+    head_speed: float
+
+
+def _with_wrist(value, wrist):
+    """(7,) tuple: value on joints 1-4, wrist on joints 5-7."""
+    out = np.full(7, value, dtype=float)
+    out[WRIST_JOINTS] = wrist
+    return tuple(out.tolist())
+
+
+def _within_task(speed):
+    """(7,) tuple: `speed` on every joint, but no faster than the task itself moves it."""
+    return tuple(min(speed, v) for v in TASK_JOINT_SPEED)
+
+
+FREE_CAPS = Caps(_within_task(FREE_JOINT_SPEED), (FREE_JOINT_ACCEL,) * 7, FREE_HEAD_SPEED)
+GENTLE_CAPS = Caps(_within_task(NEAR_JOINT_SPEED), (NEAR_JOINT_ACCEL,) * 7, NEAR_HEAD_SPEED)
+SNAPPY_FREE_CAPS = Caps(
+    _within_task(FREE_JOINT_SPEED), _with_wrist(FREE_JOINT_ACCEL, SNAPPY_WRIST_ACCEL), FREE_HEAD_SPEED
+)
+# preset -> zone -> caps. PRECISION carries no expression (gain 0): its caps bound the ramps into it.
+# Pick a preset by name (compose(caps=...), behaviors.Context.of(caps=...)); 'default' everywhere
+# unless a clip asks for another explicitly.
+CAP_PRESETS = {
+    "default": {FREE: FREE_CAPS, NEAR_USER: GENTLE_CAPS, PRECISION: GENTLE_CAPS},
+    "snappy": {FREE: SNAPPY_FREE_CAPS, NEAR_USER: GENTLE_CAPS, PRECISION: GENTLE_CAPS},
+}
+
+
+@dataclass(frozen=True)
+class SampleCaps:
+    """A preset's caps at every sample of a track: joint_speed and joint_accel (N, 7), head_speed
+    (N,), and tier (N,), the zone whose caps apply there (cap_tier)."""
+
+    joint_speed: np.ndarray
+    joint_accel: np.ndarray
+    head_speed: np.ndarray
+    tier: np.ndarray
+
+
+def cap_tier(zone):
+    """(N,) the zone whose caps apply at each sample: the most restrictive zone (PRECISION >
+    NEAR_USER > FREE) within a gain ramp's reach, so a ramp toward a gentler zone is already
+    under its caps."""
+    reach = GAIN_GUARD_SAMPLES + max(1, int(round(GAIN_RAMP_S / DT)))
+    return maximum_filter1d(np.asarray(zone, dtype=int), 2 * reach + 1, mode="nearest")
+
+
+def sample_caps(zone, caps=DEFAULT_CAPS):
+    """The preset `caps` (a CAP_PRESETS name) at every sample of a track with zones `zone`."""
+    preset = CAP_PRESETS[caps]
+    tier = cap_tier(zone)
+    by_zone = [preset[z] for z in sorted(ZONE_NAMES)]
+    return SampleCaps(
+        joint_speed=np.array([c.joint_speed for c in by_zone])[tier],
+        joint_accel=np.array([c.joint_accel for c in by_zone])[tier],
+        head_speed=np.array([c.head_speed for c in by_zone])[tier],
+        tier=tier,
+    )
+
+
+def caps_at(zone, i, caps=DEFAULT_CAPS):
+    """The Caps that apply at sample i of a track with zones `zone`."""
+    return CAP_PRESETS[caps][int(cap_tier(zone)[i])]
+
+
 PERSON_SLACK_M = 0.005  # a part may come this much closer to the person than min(functional, 0.35)
 OBSTACLE_KEEP_M = 0.03  # near obstacles a part keeps min(functional clearance, this)
 OBSTACLE_TOL_M = 0.0005  # numerical tolerance on that rule
@@ -130,13 +221,14 @@ def near_user_weight(zone):
     return 1.0 - ramped_floor((np.asarray(zone) != NEAR_USER).astype(float), guard=GAIN_GUARD_SAMPLES)
 
 
-def compose(track, contributions, kin):
+def compose(track, contributions, kin, caps=DEFAULT_CAPS):
     """The Puppy Mode track: the warped functional `track` plus `contributions` (each scaled in
-    place when it would exceed a cap or a clearance floor)."""
+    place when it would exceed a cap or a clearance floor), fitted to the CAP_PRESETS preset `caps`."""
     gain = zone_gain(track.zone)
     grip_gain = zone_gain(np.where(track.held, PRECISION, track.zone), GRIP_GAINS)
     near = near_user_weight(track.zone)
     func_clear = kin.clearance_track(track)
+    limits = sample_caps(track.zone, caps)
     log = [f"{c.name}: {note}" for c in contributions for note in c.notes]
     for _ in range(FIT_ROUNDS):
         head, joints, dgrip = _summed(contributions, track.n)
@@ -144,7 +236,7 @@ def compose(track, contributions, kin):
         expr = away_from_user(kin, track, expr, near)
         q = np.where((gain == 0.0)[:, None], track.q, track.q + expr)
         grip = np.where(grip_gain == 0.0, track.grip, np.clip(track.grip + grip_gain * dgrip, 0.0, 1.0))
-        violations = cap_violations(kin, track, q, func_clear, grip)
+        violations = cap_violations(kin, track, q, func_clear, grip, limits)
         if not violations or not _shrink(kin, track, (gain, grip_gain), contributions, violations, log):
             break
     if violations:
@@ -162,6 +254,7 @@ def compose(track, contributions, kin):
         gain=gain,
         log=log,
         name=track.name,
+        caps=caps,
     )
 
 
@@ -207,28 +300,31 @@ def clearance_floor(func_clear):
     return floor
 
 
-def cap_violations(kin, track, q, func_clear, grip=None):
+def cap_violations(kin, track, q, func_clear, grip=None, limits=None):
     """Every cap the composite q (and gripper, default the functional one) breaks, against the
-    functional track: the expressive part's joint speed, acceleration and head speed; the
-    composite's joint speed, ranges and guards; and every arm part's clearance floor to the person
-    and the obstacles (the fingers count: a chomp can reach the counter)."""
+    functional track: the expressive part's joint speed, acceleration and head speed (under
+    `limits`, a SampleCaps; default: the default preset on the track's zones); the composite's
+    joint speed, ranges and guards; and every arm part's clearance floor to the person and the
+    obstacles (the fingers count: a chomp can reach the counter)."""
+    limits = sample_caps(track.zone) if limits is None else limits
     expr = q - track.q
     out = []
-    v_e = np.gradient(expr, DT, axis=0)
-    a_e = np.gradient(v_e, DT, axis=0)
-    out += _over("expressive joint speed", np.abs(v_e) / EXPR_JOINT_SPEED, "rad/s", np.abs(v_e))
-    out += _over("expressive joint accel", np.abs(a_e) / EXPR_JOINT_ACCEL, "rad/s^2", np.abs(a_e))
-    head_speed = expressive_head_speed(kin, track, q)
-    out += _over("expressive head speed", (head_speed / EXPR_HEAD_SPEED)[:, None], "m/s", head_speed[:, None])
+    v_e = np.abs(np.gradient(expr, DT, axis=0))
+    a_e = np.abs(np.gradient(np.gradient(expr, DT, axis=0), DT, axis=0))
+    out += _over("expressive joint speed", v_e / limits.joint_speed, "rad/s", v_e, limits.joint_speed)
+    out += _over("expressive joint accel", a_e / limits.joint_accel, "rad/s^2", a_e, limits.joint_accel)
+    head = expressive_head_speed(kin, track, q)[:, None]
+    out += _over("expressive head speed", head / limits.head_speed[:, None], "m/s", head, limits.head_speed[:, None])
     v = np.abs(np.gradient(q, DT, axis=0))
     room = np.maximum(VEL_LIMITS - np.abs(np.gradient(track.q, DT, axis=0)), 1e-9)
-    out += _over("composite joint speed", np.where(v > VEL_LIMITS, np.abs(v_e) / room, 0.0), "rad/s", v)
+    out += _over("composite joint speed", np.where(v > VEL_LIMITS, v_e / room, 0.0), "rad/s", v, VEL_LIMITS[None])
     lim = guard_limits(kin)
     room = np.maximum(lim - np.abs(track.q), 1e-9)
-    out += _over("joint limit/guard", np.where(np.abs(q) > lim, np.abs(expr) / room, 0.0), "rad", np.abs(q))
+    guard = np.where(np.abs(q) > lim, np.abs(expr) / room, 0.0)
+    out += _over("joint limit/guard", guard, "rad", np.abs(q), lim[None])
     if grip is not None:
         g_e = gripper_rate(grip - track.grip)[:, None]
-        out += _over("expressive gripper speed", g_e / EXPR_GRIP_SPEED, "strokes/s", g_e)
+        out += _over("expressive gripper speed", g_e / EXPR_GRIP_SPEED, "strokes/s", g_e, np.array([[EXPR_GRIP_SPEED]]))
     return out + _clearance_violations(kin, track, q, func_clear, grip)
 
 
@@ -277,14 +373,16 @@ def expressive_head_speed(kin, track, q):
     return worst
 
 
-def _over(kind, ratio, unit, value):
-    """Violations where ratio (N, k) > 1, one per sample (its worst column: a joint when k = 7)."""
+def _over(kind, ratio, unit, value, cap):
+    """Violations where ratio (N, k) > 1, one per sample (its worst column: a joint when k = 7);
+    cap broadcasts against value (its row 0 serves every sample when it has one row)."""
     worst = ratio.max(axis=1)
     col = ratio.argmax(axis=1)
+    cap = np.broadcast_to(cap, value.shape)
 
     def detail(i):
         where = f" (joint {col[i] + 1})" if ratio.shape[1] == 7 else ""
-        return f"{value[i, col[i]]:.3f} {unit}{where} at {i * DT:.2f} s"
+        return f"{value[i, col[i]]:.3f} {unit} > {cap[i, col[i]]:.3f}{where} at {i * DT:.2f} s"
 
     return [Violation(kind, int(i), float(worst[i]), detail(i)) for i in np.nonzero(worst > 1.0 + 1e-9)[0]]
 

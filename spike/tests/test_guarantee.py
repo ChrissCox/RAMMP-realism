@@ -11,7 +11,7 @@ from puppy_sim import checks, curves, layer, runs
 from puppy_sim import director as D
 from puppy_sim import timeline as tl
 from puppy_sim.kin import ARM_PARTS
-from puppy_sim.layer import EXPR_JOINT_ACCEL, Contribution
+from puppy_sim.layer import FREE_JOINT_ACCEL, Contribution
 from puppy_sim.timeline import DT, FREE, NEAR_USER, PRECISION
 
 RUNS = ("grab_container_20261029_132745", "grab_container_20261029_131558", "grab_container_20261028_191809")
@@ -114,19 +114,22 @@ def test_a_hold_at_the_fastest_moment_adds_at_most_the_accel_cap(sc, name):
     k = sc.kin()
     func = runs.functional_track(runs.load_run(name), k)
     at = int(np.argmax(tl.joint_speed(func))) * DT
-    for cap in (EXPR_JOINT_ACCEL, 1.0):
+    for cap in (FREE_JOINT_ACCEL, 1.0):
         holds = [tl.Hold(at, 1.0, tl.hold_ramp_s(func, at, cap, 0.05))]
         warped = tl.warp(func, holds)
         assert _warp_added_accel(func, warped).max() <= cap * (1.0 + 1e-6)
         assert warped.q.tobytes() == tl.interp_rows(func.q, tl.warp_indices(func.n, holds)).tobytes()
 
 
+@pytest.mark.parametrize("lock_on", D.LOCK_ON_MODES)
 @pytest.mark.parametrize("name", RUNS)
-def test_the_directors_pauses_add_at_most_the_accel_cap(sc, name):
+def test_the_directors_pauses_add_at_most_the_accel_cap_of_each_tier(sc, name, lock_on):
     k = sc.kin()
     func = runs.functional_track(runs.load_run(name), k)
-    _, holds, slows = D.plan(func, D.find_events(func, k), D.RULES["grab_container"], sc, k)
-    assert _warp_added_accel(func, tl.warp(func, holds, slows)).max() <= EXPR_JOINT_ACCEL * (1.0 + 1e-6)
+    rules = [r for r in D.RULES["grab_container"] if r.lock_on in (None, lock_on)]
+    planned = D.plan(func, D.find_events(func, k), rules, sc, k)
+    warped = tl.warp(func, planned.holds, planned.slows)
+    assert np.all(_warp_added_accel(func, warped) <= layer.sample_caps(warped.zone).joint_accel * (1.0 + 1e-6))
 
 
 # --------------------------------------------------------------- precision identity, end to end
@@ -138,7 +141,7 @@ def test_precision_is_the_functional_path_at_tau_through_warp_and_compose(sc, fu
     dtau/dt stays in [0, 1] there."""
     k = sc.kin()
     holds = [
-        tl.Hold(at=3.5, hold_s=0.6, ramp_s=tl.hold_ramp_s(functional, 3.5, EXPR_JOINT_ACCEL, 0.3)),
+        tl.Hold(at=3.5, hold_s=0.6, ramp_s=tl.hold_ramp_s(functional, 3.5, FREE_JOINT_ACCEL, 0.3)),
         tl.Hold(at=5.4, hold_s=0.8, ramp_s=0.3),
     ]
     slows = [tl.Slow(t0=8.84, t1=10.5, factor=0.6, ramp_s=0.4, hold_s=0.5)]
@@ -230,7 +233,7 @@ def test_wiggle_and_clack_stop_when_a_forbidden_span_starts_mid_beat(sc, home, m
     else:
         rest.zone[i:] = NEAR_USER if where == "near the user" else PRECISION
     c = make(B.Context.of(rest, sc, k), 1.0)
-    assert np.any(c.head[:i]) or np.any(c.grip[:i])
+    assert np.any(c.head[:i]) or np.any(c.joints[:i]) or np.any(c.grip[:i])
     assert not np.any(c.head[i:]) and not np.any(c.joints[i:]) and not np.any(c.grip[i:])
     out = layer.compose(rest, [c], k)
     assert out.grip[i:].tobytes() == rest.grip[i:].tobytes()
@@ -271,9 +274,34 @@ def test_unknown_phases_messages_and_capabilities_are_precision():
     assert runs.zone_of("grab_container", "view", "") == FREE
     assert runs.zone_of("grab_container", "view", "an unexpected message") == PRECISION
     assert runs.zone_of("grab_container", "home", "re-homing after a fault") == PRECISION
-    assert runs.zone_of("grab_container", "approach", runs.APPROACH_MESSAGE) == PRECISION  # today's grasp.py name
+    assert runs.zone_of("grab_container", "approach", "a new message") == PRECISION
     assert runs.zone_of("grab_container", "canceled", "") == PRECISION
     assert runs.zone_of("button_press", "home", "") == PRECISION
+
+
+def test_todays_grab_container_pairs_are_known():
+    """grasp.py reports the approach under its own phase, and a dry run's planning: the approach is
+    the same FREE approach (its final part PRECISION by geometry); a dry run moves nothing, so its
+    planning is PRECISION and Puppy Mode does not move either."""
+    assert runs.zone_of("grab_container", "approach", runs.APPROACH_MESSAGE) == FREE
+    assert runs.zone_of("grab_container", "approach", runs.DRY_RUN_MESSAGE) == PRECISION
+    assert runs.zone_of("grab_container", "raise", runs.DRY_RUN_MESSAGE) == PRECISION
+
+
+def test_todays_approach_phase_gives_the_recorded_runs_zones(sc, run):
+    """The recorded run with its approach reported as today's grasp.py does it: the same zones and
+    phase names, so the director sees the same events."""
+    import dataclasses
+
+    k = sc.kin()
+    renamed = tuple(
+        (t, "approach" if (phase, msg) == ("grasp", runs.APPROACH_MESSAGE) else phase, msg)
+        for t, phase, msg in run.feedback
+    )
+    today = runs.functional_track(dataclasses.replace(run, feedback=renamed), k)
+    recorded = runs.functional_track(run, k)
+    assert np.array_equal(today.zone, recorded.zone)
+    assert [p.name for p in today.phases] == [p.name for p in recorded.phases]
 
 
 def test_an_unknown_capability_is_replayed_exactly(sc, run):
@@ -295,7 +323,7 @@ def test_moving_beats_put_on_precision_events_never_reach_precision(sc, function
     k = sc.kin()
     keep = tuple(r for r in D.RULES["grab_container"] if r.event != "precision")
     monkeypatch.setitem(D.RULES, "doctored", keep + (D.Rule("precision", beat),))
-    puppy, parts = D.direct_track(functional, "doctored", sc, k)
+    puppy, parts = D.direct_track(functional, "doctored", sc, k, budget=None)
     prec = puppy.zone == PRECISION
     for c in parts:
         assert not np.any(c.head[prec]) and not np.any(c.joints[prec]), c.name

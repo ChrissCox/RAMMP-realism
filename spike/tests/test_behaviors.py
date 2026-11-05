@@ -1,7 +1,7 @@
 """The vocabulary: every behavior starts and ends at rest at zero offset, fits the caps at home by
 default (and after compose's auto-scaling anywhere), is deterministic for a seed, and keeps its
 own gating: no wiggle or clack while holding or near the user, no background life in PRECISION,
-a level look while holding, a sniff that keeps its standoff."""
+a level look while holding, a sniff that keeps its standoff, motion craft off the move."""
 
 import copy
 
@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from puppy_sim import behaviors as B
-from puppy_sim import checks, layer, runs
+from puppy_sim import checks, layer, render, runs
 from puppy_sim import timeline as tl
 from puppy_sim.timeline import DT, NEAR_USER, PRECISION
 
@@ -152,11 +152,31 @@ def test_caps_hold_after_auto_scaling_at_the_view_pose(sc, functional, name):
     assert not _failed(_composed(ctx, AT_REST[name](ctx))[2])
 
 
-def test_a_too_big_wiggle_is_limited_to_the_caps_and_noted(at_rest):
+def test_the_wiggle_sways_visibly_within_the_caps(sc, home, at_rest):
+    """At home the sway swings away from the user and back (the wrist has 5 mm toward them); every
+    joint stays within its own caps; the face moves well over 15 px in the close camera; snappy's
+    wrist wags further, everything else the same."""
     ctx, made = at_rest
     c = made["wiggle"]
-    assert c.notes and "limited" in c.notes[0]  # 2 Hz: the 3 rad/s^2 cap allows only a little
-    assert np.abs(c.head[:, 3]).max() < B.WIGGLE_MAX_ROLL_RAD
+    assert c.notes and "sway" in c.notes[0] and "caps 'default'" in c.notes[0]
+    out = _composed(ctx, c)[0]
+    out.beats = [tl.Label("w", *c.span())]
+    assert render.legibility(out, ctx.kin)[0].eye_px > 2 * render.LEGIBLE_PX
+    snappy = B.wiggle(B.Context.of(ctx.track, sc, ctx.kin, caps="snappy"), T_ON)
+    wrist = slice(4, 7)
+    assert np.abs(snappy.joints[:, wrist]).max() > 2.0 * np.abs(c.joints[:, wrist]).max()
+    assert np.allclose(snappy.joints[:, :4], c.joints[:, :4])
+
+
+def test_motion_craft_stays_off_the_move(on_a_move):
+    """Boundary beats: the wind-up is back at rest when the move starts, the follow-through starts
+    once the arm is still, the lock-on stays in its window."""
+    ctx, made = on_a_move
+    moving = tl.joint_speed(ctx.track) >= tl.STOP_RAD_S
+    for name in ("wind_up", "follow_through", "lock_on"):
+        c = made[name]
+        assert not np.any(c.active() & moving), name
+    assert np.any(made["lead_gaze"].active() & moving)  # the in-motion one rides on it
 
 
 @pytest.mark.parametrize("make", [B.breathe, B.micro_life])
@@ -272,7 +292,7 @@ def test_lead_gaze_looks_ahead(on_a_move):
 
 def test_wind_up_draws_back_against_the_move(on_a_move):
     ctx, made = on_a_move
-    i_back = int(round(1.7 / DT))  # drawn back, before the move starts at 2.0 s
+    i_back = int(round(1.6 / DT))  # drawn back, before the move starts at 2.0 s
     q_back = ctx.track.q[i_back] + ctx.kin.head_dq(ctx.track.q[i_back], made["wind_up"].head[i_back])
     eye_rest, R_rest = ctx.kin.fk(ctx.track.q[i_back], "eye")
     _, R_back = ctx.kin.fk(q_back, "eye")

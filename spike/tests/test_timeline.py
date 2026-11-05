@@ -8,8 +8,7 @@ from puppy_sim.timeline import DT, FREE, PRECISION
 
 
 def _warp_events(track):
-    at = tl.quiet_time(track, 4.0, 6.0)  # in the detect hold of the reference run
-    holds = [tl.Hold(at=at, hold_s=1.5, ramp_s=0.4), tl.Hold(at=12.5, hold_s=0.8, ramp_s=0.5)]
+    holds = [tl.Hold(at=5.3, hold_s=1.5, ramp_s=0.4), tl.Hold(at=12.5, hold_s=0.8, ramp_s=0.5)]  # 5.3: in detect
     slows = [tl.Slow(t0=7.0, t1=9.0, factor=0.5, ramp_s=0.3)]
     return holds, slows
 
@@ -72,7 +71,6 @@ def test_hold_ramp_bounds_the_added_acceleration(functional):
     ramp = tl.hold_ramp_s(functional, at, cap, min_ramp_s=0.1)
     v = tl.joint_speed(functional)[int(round(at / DT))]
     assert v * np.pi / (2 * ramp) <= cap + 1e-9
-    assert tl.quiet_time(functional, 4.0, 6.0) >= 5.1  # the arm is still in 'detect'
 
 
 def test_scripted_moves_chain_into_one_functional_track(home):
