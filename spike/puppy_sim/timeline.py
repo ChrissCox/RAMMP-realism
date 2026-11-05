@@ -51,7 +51,9 @@ class Track:
     track's time), so checks can hold it to that path. A composed (Puppy Mode) track also carries
     `func` (the warped functional track on the same clock), `gain` (N,), `caps` (the cap preset it
     was fitted to) and a `log` of what the composition changed; a directed one its time `budget` and
-    the `tier` it promises (director.BOUNDARY: every functional move plays exactly as recorded)."""
+    the `tier` it promises (director.BOUNDARY: every functional move plays exactly as recorded). An
+    achieved track (dynamics.achieved: what the arm does under a control mode) carries the track it
+    was `commanded` and the `control` it ran under; checks and cameras use the commanded one."""
 
     q: np.ndarray
     grip: np.ndarray
@@ -68,6 +70,8 @@ class Track:
     caps: str = ""
     budget: Budget | None = None
     tier: str = ""
+    commanded: "Track | None" = None
+    control: str = ""
 
     @property
     def n(self):

@@ -243,4 +243,39 @@ def check_named(name):
     built = clip.build()
     tracks = built if isinstance(built, tuple) else (built,)
     labels = ("plain", "puppy") if len(tracks) == 2 else ("puppy" if tracks[0].func is not None else "plain",)
-    return [(name, label, t.duration, check_track(t, kin), t.log) for label, t in zip(labels, tracks)]
+    rows = []
+    for label, t in zip(labels, tracks):
+        if t.commanded is None:
+            rows.append((name, label, t.duration, check_track(t, kin), t.log))
+        else:  # an achieved track (dynamics.achieved): the checks hold its command
+            cmd = t.commanded
+            rows.append((name, t.control, cmd.duration, [*check_track(cmd, kin), achieved_note(t, kin)], cmd.log))
+    return rows
+
+
+def achieved_note(track, kin):
+    """An informational Check on an achieved track: how far the arm strays from its command, and
+    its least margin (mm) over the command's clearance floors to the user and to the obstacles,
+    with the plain task's under the same control for comparison (the checks hold the command; the
+    simulated arm has no contacts, so it can dip into the counter)."""
+    cmd = track.commanded
+    err = 1000.0 * max(
+        float(np.linalg.norm(kin.fk_track(track.q, s)[0] - kin.fk_track(cmd.q, s)[0], axis=1).max())
+        for s in ("eye", "tool")
+    )
+    floor = layer.clearance_floor(kin.clearance_track(cmd.func if cmd.func is not None else cmd))
+    sides = [track] + ([track.func] if track.func is not None else [])
+    clear = [kin.clearance_track(t) for t in sides]
+    margin = [1000.0 * (c - floor).min(axis=(0, 2)) for c in clear]
+    words = []
+    for row, target in ((0, "user"), (1, "obstacles")):
+        over = clear[0][:, row] - floor[:, row]
+        i, j = np.unravel_index(int(np.argmin(over)), over.shape)
+        there = f" ({ARM_PARTS[j]} {1000.0 * clear[0][i, row, j]:.1f} mm clear at {i * DT:.2f} s)"
+        plain = f"; the plain task under it: {margin[1][row]:+.1f}" if len(margin) > 1 else ""
+        words.append(f"{target} floor margin {margin[0][row]:+.1f} mm{there}{plain}")
+    detail = (
+        f"under {track.control} the face strays from its command by up to {err:.1f} mm; "
+        f"{'; '.join(words)}; the checks above hold the command"
+    )
+    return Check("achieved", True, f"{err:.1f} mm", detail)

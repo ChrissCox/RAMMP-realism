@@ -25,8 +25,15 @@ uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 .venv/Scripts/python -m puppy_sim sheet all            # contact sheets only (quick look)
 .venv/Scripts/python -m puppy_sim check all            # safety checks; exit code 1 on a violation
 .venv/Scripts/python -m puppy_sim peaks reel_reactions # media/<clip>_peaks.png + each beat's on-screen travel
+.venv/Scripts/python -m puppy_sim compliance impedance_wag   # each beat as commanded vs as the arm would execute it
+.venv/Scripts/python -m puppy_sim render idle_alive --control impedance:soft   # ... rendered: media/idle_alive__impedance_soft.*
 .venv/Scripts/python -m pytest                         # tests
 ```
+
+`compliance` and `render --control` simulate the execution (see "Compliance" below); both take
+`--positions-only` (no velocity/acceleration feedforward), `--armature A`, `--friction N` (one value or
+seven) and `--payload KG`, and `compliance` takes `--control` more than once (default: position and
+impedance soft/default/stiff).
 
 Outputs go to `media/`, and intermediate files go to `media/_work/`, which git ignores. Each clip
 produces an H.264 MP4 (25 fps, 1280x720, or 1600x720 side by side), a GIF for documents (640 px
@@ -56,6 +63,10 @@ far it moves the eye and the mouth (the farther fingertip) on screen in the clos
 | `reel_at_rest` | breathe, micro-life, gaze, head tilt, perk, droop with puppy eyes, doze and wake, each once at home, its name in the chip |
 | `reel_reactions` | nod, bounce, wiggle, clack, sniff, double take, search, startle, shake off, proud |
 | `reel_craft` | wind-up, follow-through and lock-on between scripted moves; the lead gaze rides on one (labelled 'later: in motion') |
+| `impedance_wag` | the happy wag, simulated: position mode vs the driver's impedance mode with its default gains (the wag reads the same: 52 vs 54 px) |
+| `impedance_lock_on` | lock_on_view's Puppy Mode track, simulated: position vs impedance default (the lean reads the same; holding the container, the springy arm sags up to 37 mm) |
+| `impedance_profiles` | success_proud's Puppy Mode track, simulated under the 'soft' vs 'stiff' gains (holding, the arm sags up to 63 vs 18 mm) |
+| `impedance_friction` | what-if: the wag on 'soft' gains with joint friction the driver does not cancel (assumed): it shrinks to about half |
 
 Some clips register their own camera from the clip module (`lock_on`, `boop`, `oops_follow`,
 `wag_close`) with `render.CAMERAS.setdefault`.
@@ -201,6 +212,49 @@ a puzzled search and a droop (puppy eyes and a shake-off in full).
 Unknown phases are PRECISION and get no beat, and every beat is fenced out of PRECISION, so no
 spatial offset ever lands on a precise sample (tested on all three runs).
 
+## Compliance: the driver's execution modes (`dynamics.py`)
+
+Everywhere else the spike is kinematic, so every video shows the command tracked perfectly. On the
+arm a capability runs its moves in POSITION mode or in the driver's joint IMPEDANCE mode with gains
+(a profile, 'soft' | 'medium' | 'stiff' | the session default, which starts as 'medium', or custom
+{kq, zeta, torque_limit}), and a Puppy Mode beat runs in the task's mode and gains. `dynamics.py`
+simulates that: MuJoCo forward dynamics of the menagerie Gen3 with gravity, the 2F-85 welded open,
+the OAK face, and while held a 0.4 kg container (assumed) whose base stands on the counter until the
+arm lifts it (the counter is a contact for it, nothing else touches).
+
+- **IMPEDANCE** ports kinova-gen3-driver 2.0.0's `JointImpedanceMode::compute` at its 1 kHz:
+  `tau = g(q) + ramp * (Kq * clamp(q_d - q, +-leash) - D * (qd - qd_ref) + M(q) qdd_ref)`, then
+  clamped to the torque limits, with `D = 2 zeta sqrt(Kq M_ii(q))` and the reference sampled from the
+  track by quintic Hermite as the trajectory executor does (velocities and accelerations fed forward,
+  as cuRobo's plans carry them; `feedforward=False` is a positions-only stream). The profiles are the
+  driver's: soft Kq 40/15 N m/rad, zeta 0.4, leash 0.45 rad; medium 80/30, 0.5, 0.35; stiff 160/60,
+  0.7, 0.25 (shoulder and elbow / wrist); torque limits 39/9 N m. The driver's g and M come from its
+  URDF: here the plant's own model without armature and without the container (it has no payload
+  term, no Coriolis, no friction compensation).
+- **POSITION** is Kortex's own actuator servo (firmware, not in the driver) fed through the driver's
+  rate limit; it is modelled as exact, so it is the kinematic playback.
+- **The plant's armature is the big unknown.** The menagerie gives every joint 0.1 kg m^2 (added to
+  stabilise its position actuators, not identified), which the driver's damping does not know about:
+  the wrist roll's effective damping ratio drops to 0.06. `Plant(armature=0)` is the other bound
+  (the actuators' torque loops hide the rotor inertia). The menagerie has no joint friction;
+  `Plant(friction_nm=...)` adds some as a what-if (the driver does not compensate friction).
+- `dynamics.achieved(track, control)` is the same timeline with the joints the arm reaches (it
+  keeps `commanded` and, for a composed track, its functional track achieved too, so a beat's
+  legibility compares what the arm does with and without it); `check` holds the command and adds a
+  note with how far the arm strays and its margins over the command's clearance floors.
+  `dynamics.response` measures each beat commanded vs achieved, the tracking error and, inside
+  PRECISION, where the Puppy Mode arm and the plain arm put the tool on the same commands.
+
+What it shows: with the trajectory's feedforward the beats read the same in impedance as in position
+mode (within -4 % to +10 %; if anything a little larger, not smaller: the arm's sway modes near 2 Hz sit close
+to the 1.25 Hz wag). What compliance does show is the held container: the driver does not model
+its weight, so while holding the arm sags 18 mm (stiff), 34-37 mm (default) or 63-65 mm (soft) in
+the task itself. Inside PRECISION Puppy Mode adds nothing on lock_on_view (under 0.5 mm), but on
+success_proud the proud beat while holding ends 0.46 s before the set-down and its motion has not
+settled: the arm is up to 3 mm (default; 6 mm soft) off where the plain task's arm is, for about 1 s
+(2.3 s soft). A positions-only stream overshoots every beat by 6-28 %; joint friction (assumed 1 /
+0.5 N m) halves the wag on 'soft'.
+
 ## Findings so far
 
 - **At home the arm is folded beside the user.** With the assumed seating, the elbow is 7 cm from
@@ -260,6 +314,7 @@ Code: `scene.py` (model), `kin.py` (FK/IK/look-at/gravity turns/clearance), `run
 phases, zones), `curves.py`, `timeline.py` (Track, time-warp, scripted moves), `layer.py`
 (composition, gains, cap presets), `envelope.py` (the task's own motion envelope), `behaviors.py`
 (the vocabulary), `director.py` (task events to beats), `checks.py`, `render.py` (cameras,
-overlays, legibility, peak sheets), `clips/`, `__main__.py`, and `tests/`.
+overlays, legibility, peak sheets), `dynamics.py` (the driver's execution modes, simulated), `clips/`,
+`__main__.py`, and `tests/`.
 
 The menagerie models in `third_party/` are BSD-licensed; see the LICENSE file in each folder.

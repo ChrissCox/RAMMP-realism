@@ -501,17 +501,22 @@ def test_every_spliced_beat_validates(): ...
 def test_holds_still_under_gravity():       # 2 s at home, impedance default
     assert np.abs(err).max() < 1e-3
 def test_step_overshoot_matches_zeta(): ...  # within 20 % of the analytic second-order overshoot
-def test_puppy_adds_no_precision_deviation():  # runs 132745 and 191809, impedance default, demo
-    assert precision_deviation(plain, puppy, "impedance", "default") < 1e-3   # rad
+def test_puppy_adds_no_precision_deviation():  # runs 132745, 191809 and success_proud; soft, default, stiff
+    assert tool_gap_mm_on_precision_samples < 0.5
 ```
 
 - [ ] **Step 2: Run the sim tests; expect FAIL.**
-- [ ] **Step 3: Implement or port** the dynamics. If `test_puppy_adds_no_precision_deviation` fails,
-  the director must end beats earlier before a PRECISION move so the controller settles. Add a settle
-  time per mode to `Director` (a `Director(settle_s=...)` constructor argument, default 0 for
-  position) and record the value in the spec.
-- [ ] **Step 4: Run the sim tests; expect PASS.**
-- [ ] **Step 5: Commit** `feat(sim): driver joint-impedance model and the precision-deviation check`.
+- [ ] **Step 3: Port** the dynamics from `spike/puppy_sim/dynamics.py`. It is the driver 2.0.0 law
+  with these profiles: medium (session default) Kq 80/30 zeta 0.5; soft 40/15, 0.4; stiff 160/60,
+  0.7. Beats are always sent with velocities and accelerations.
+- [ ] **Step 4: Add the settle time** to `Director`, as
+  `Director(..., control=("position", None))` updated by `Director.set_control(mode, gains)`. The
+  minimum time between a beat's end and the next PRECISION move while `held` is soft 2.3 s, medium
+  1.1 s and stiff 0.1 s under impedance, and the usual 0.34 s otherwise. Add a puppy_motion test,
+  `test_settle_before_precision_while_holding_under_impedance`. In Task 12, `PuppyArm` calls
+  `director.set_control` on every move call.
+- [ ] **Step 5: Run the sim tests and both `puppy_motion` test commands; expect PASS.**
+- [ ] **Step 6: Commit** `feat(sim): driver joint-impedance model, settle times and the precision-deviation check`.
 
 ## Part C — `puppy_mode_ros` engine hook
 

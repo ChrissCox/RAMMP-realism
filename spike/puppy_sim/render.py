@@ -100,9 +100,11 @@ class Camera:
         return forward, up
 
     def lookats(self, track, kin):
-        """(N, 3) where the camera looks at each sample of `track`."""
+        """(N, 3) where the camera looks at each sample of `track` (an achieved track: where it
+        looks for the commanded one, so both sides of a comparison share the camera)."""
         if self.lookat is not None:
             return np.tile(np.asarray(self.lookat, dtype=float), (track.n, 1))
+        track = track.commanded if track.commanded is not None else track
         func = track.func if track.func is not None else track
         if self.follow_s is None:
             return np.tile(kin.fk(func.q[0], "ee")[0] + np.asarray(self.head_offset), (track.n, 1))
@@ -310,14 +312,24 @@ def overlay_side(img, title, subtitle, plain, puppy, t, mood, show_title=True, h
 
 # ------------------------------------------------------------------------------------ frames
 class Reel:
-    """A clip's tracks on their stages: frame(k) -> (time, overlaid image), any k in any order."""
+    """A clip's tracks on their stages: frame(k) -> (time, overlaid image), any k in any order.
+    control (a dynamics.control spec): show what the arm would do executing each track's command
+    under it, simulated on `plant` (dynamics.Plant; default: dynamics.DEFAULT_PLANT)."""
 
-    def __init__(self, clip, fast=False):
+    def __init__(self, clip, fast=False, control=None, plant=None):
         self.clip = clip
         built = clip.build()
         self.tracks = built if isinstance(built, tuple) else (built,)
         self.subtitle = clip.subtitle_for(self.tracks)
         sc = scene_mod.build(clip.run)
+        if control is not None:
+            from . import dynamics  # it measures legibility with this module
+
+            ctl, plant = dynamics.control(control), plant or dynamics.DEFAULT_PLANT
+            commands = [t.commanded if t.commanded is not None else t for t in self.tracks]
+            self.tracks = tuple(dynamics.achieved(t, ctl, sc, plant) for t in commands)
+            lines = [self.subtitle] if isinstance(self.subtitle, str) else list(self.subtitle)
+            self.subtitle = [*lines, f"simulated: {ctl.describe()}; {plant.describe()}"]
         self.camera = CAMERAS[clip.camera]
         self.kind = "side" if len(self.tracks) == 2 else "single"
         size = PANEL_SIZE if self.kind == "side" else SINGLE_SIZE
@@ -440,14 +452,20 @@ def peak_sheet(clip, out_dir=MEDIA_DIR):
 
 
 # ----------------------------------------------------------------------------------- outputs
-def render_clip(clip, fast=False):
+def render_clip(clip, fast=False, control=None, plant=None):
     """Render a clip to media/<name>.mp4, .gif and _sheet.png; fast: half size, no GIF, into
-    FAST_DIR. Returns {kind: path}."""
+    FAST_DIR. control (and plant): the simulated execution (see Reel), into
+    media/<name>__<control>.* so it never replaces the clip itself. Returns {kind: path}."""
     out_dir = FAST_DIR if fast else MEDIA_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    reel = Reel(clip, fast)
-    mp4 = out_dir / f"{clip.name}.mp4"
-    gif_dir = WORK_DIR / f"{clip.name}_gif"
+    reel = Reel(clip, fast, control, plant)
+    stem = clip.name
+    if control is not None:
+        from . import dynamics
+
+        stem = f"{clip.name}__{dynamics.slug(control, plant)}"
+    mp4 = out_dir / f"{stem}.mp4"
+    gif_dir = WORK_DIR / f"{stem}_gif"
     shutil.rmtree(gif_dir, ignore_errors=True)
     gif_dir.mkdir(parents=True)
     picks = set(reel.sheet_picks().tolist())
@@ -462,9 +480,9 @@ def render_clip(clip, fast=False):
             tiles.append(reel.frame(k, title=False))
     writer.close()
     reel.close()
-    out = {"mp4": mp4, "sheet": contact_sheet(clip, reel.subtitle, reel.kind, tiles, out_dir)}
+    out = {"mp4": mp4, "sheet": contact_sheet(clip, reel.subtitle, reel.kind, tiles, out_dir, stem)}
     if not fast:
-        out["gif"] = make_gif(gif_dir, out_dir / f"{clip.name}.gif")
+        out["gif"] = make_gif(gif_dir, out_dir / f"{stem}.gif")
     return out
 
 
@@ -548,22 +566,23 @@ def _tile_sheet(title, subtitle, tiles, cols, tile_w):
     return sheet
 
 
-def contact_sheet(clip, subtitle, kind, tiles, out_dir):
-    """Evenly spaced frames in a grid with their timestamps, under the clip's title."""
+def contact_sheet(clip, subtitle, kind, tiles, out_dir, stem=None):
+    """Evenly spaced frames in a grid with their timestamps, under the clip's title, into
+    out_dir/<stem>_sheet.png (stem: the clip's name by default)."""
     lines = [subtitle] if isinstance(subtitle, str) else subtitle
     labelled = [(f"t = {t:.1f} s", img) for t, img in tiles]
     sheet = _tile_sheet(clip.title, "  |  ".join(lines), labelled, SHEET_COLUMNS[kind], SHEET_TILE_WIDTH[kind])
-    path = out_dir / f"{clip.name}_sheet.png"
+    path = out_dir / f"{stem or clip.name}_sheet.png"
     sheet.save(path)
     return path
 
 
-def render_named(name, fast=False):
+def render_named(name, fast=False, control=None, plant=None):
     """Worker: render the registered clip `name`; (name, {kind: (path, MB)}, seconds)."""
     from .clips import registry
 
     t0 = time.time()
-    out = render_clip(registry()[name], fast)
+    out = render_clip(registry()[name], fast, control, plant)
     return name, {k: (str(path), path.stat().st_size / 1e6) for k, path in out.items()}, time.time() - t0
 
 

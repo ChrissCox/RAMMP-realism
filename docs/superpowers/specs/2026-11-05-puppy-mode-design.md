@@ -234,10 +234,22 @@ grab_container, for example, runs every move in impedance when its goal sets `im
 - **Near the person, always impedance.** In NEAR_USER a beat uses IMPEDANCE with the task's gains,
   or the `default` profile if the task is in POSITION mode. A compliant arm yields if it is bumped.
 - **No task move is changed.** The task's own move calls keep whatever mode they asked for.
-- **Under impedance, small beats shrink.** The arm tracks less exactly, so a sway of a few
-  millimetres or a 2.5 cm lean comes out smaller than commanded. The simulator models the driver's
-  joint impedance law (`spike/puppy_sim/dynamics.py`) to measure how much, and the beat amplitudes
-  are tuned against that model, not against perfect tracking.
+- **Measured in simulation: impedance does not soften the beats.** The simulator runs the driver's
+  joint impedance law from kinova-gen3-driver 2.0.0 (`spike/puppy_sim/dynamics.py`, 1 kHz):
+  gravity, spring, damping 2·zeta·sqrt(Kq·M_ii), and velocity and acceleration feedforward.
+  - Beats sent as full trajectories (positions, velocities, accelerations) read within −4 % to +10 %
+    of position mode, under every profile: medium (the session default), soft and stiff.
+  - Two things do change:
+    - **Held objects sag.** The driver doesn't compensate payload, so a 0.4 kg container sags about
+      6 cm on soft, 3.5 cm on medium and 2 cm on stiff. That is the task's own sag and is the same
+      with or without Puppy Mode.
+    - **Unmodelled joint friction could halve a wag on soft.** It is unmeasured; measure it in the
+      hardware phase.
+  - Beats must always send velocities and accelerations. Positions-only overshoots by 6–28 %.
+- **Settle before a precise move under impedance while holding.** A beat that ends just before a
+  precise move leaves the springy arm still settling. The director keeps a settle time between a
+  beat's end and the next PRECISION move while holding something: soft 2.3 s, medium 1.1 s, stiff
+  0.1 s. In position mode, or when not holding, it keeps the usual 0.34 s.
 - **The timing-only guarantee is about commands.** In impedance mode the achieved path already differs
   slightly from the commanded one for the task itself. Puppy Mode must not add to that inside
   PRECISION: the simulator checks that the achieved path there is the same with and without Puppy
