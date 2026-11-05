@@ -1,0 +1,9 @@
+# Offline simulation preview only: no ROS, no robot I/O.
+mujoco==3.10.0
+numpy>=2.0
+scipy>=1.13
+pillow>=10.0
+imageio>=2.34
+imageio-ffmpeg>=0.5
+pytest>=8.0
+pyyaml>=6.0

@@ -1,0 +1,5 @@
+spike/.venv/
+__pycache__/
+spike/media/_work/
+.pytest_cache/
+.ruff_cache/
