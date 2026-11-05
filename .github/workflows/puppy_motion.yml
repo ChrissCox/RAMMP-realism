@@ -1,0 +1,30 @@
+name: puppy_motion
+
+on:
+  push:
+    paths:
+      - "puppy_motion/**"
+      - ".github/workflows/puppy_motion.yml"
+  pull_request:
+    paths:
+      - "puppy_motion/**"
+      - ".github/workflows/puppy_motion.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.10"
+            numpy: "numpy==1.26.4"
+          - python: "3.12"
+            numpy: "numpy>=2"
+    defaults:
+      run:
+        working-directory: puppy_motion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run --python ${{ matrix.python }} --with-editable . --with "${{ matrix.numpy }}" --with pytest pytest -q
