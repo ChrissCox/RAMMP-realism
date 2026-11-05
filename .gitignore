@@ -5,3 +5,4 @@ spike/media/_work/
 .ruff_cache/
 spike/media/*.gif
 spike/media/*_peaks.png
+.superpowers/
