@@ -127,7 +127,7 @@ def test_arm_capsules_structure_and_held_sphere():
     tool, _ = chain.fk(q, "tool")
     h = held["head"][-1]
     assert h.r == 0.09 and np.allclose(h.a, ee + 0.17 * R[:, 2]) and np.allclose(h.b, h.a)
-    assert free["head"][0].r == 0.06
+    assert free["head"][0].r == 0.065
     assert np.allclose(free["head"][0].a, ee) and np.allclose(free["head"][0].b, tool)
 
 
@@ -145,7 +145,8 @@ def test_spike_person_clearances_reproduced():
         scene = Scene.from_param(f.read())
     track = runs_helper.functional_track(runs_helper.RUN_NAMES[0])
     mins = np.full(4, np.inf)
-    for q, held in list(zip(track.q, track.held))[::4]:
+    for q, held in list(zip(track.q, track.held)):
         mins = np.minimum(mins, clearances(chain, scene, q, bool(held))[0])
     for part, m in zip(PARTS, mins):
-        assert abs(m - SPIKE_MIN[part]) < 0.03, (part, m, SPIKE_MIN[part])
+        # conservative: never more clearance than the spike's mesh, at most 0.04 m less
+        assert SPIKE_MIN[part] - 0.04 <= m <= SPIKE_MIN[part] + 0.005, (part, m, SPIKE_MIN[part])

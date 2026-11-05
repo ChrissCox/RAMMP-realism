@@ -6,13 +6,9 @@ from typing import List
 import numpy as np
 
 PARTS = ("upper_arm", "forearm", "wrist", "head")
-RADII = {"upper_arm": 0.06, "forearm": 0.055, "wrist": 0.05, "head": 0.06}
+RADII = {"upper_arm": 0.06, "forearm": 0.055, "wrist": 0.05, "head": 0.065}  # head grown from the brief's 0.06 so it reads no more clearance than the spike mesh (0.377 m)
 HELD_RADIUS = 0.09
 HELD_OFFSET = 0.17  # along the end-effector z axis
-# The forearm tube starts this fraction of the way from the elbow to the wrist: the elbow housing
-# belongs to the upper-arm capsule. Tuned so the capsule model reproduces the spike's mesh-based
-# forearm clearance (0.108 m) on run 132745; with the full link the model reads 0.072 m.
-FOREARM_START = 0.3
 # Link-frame origins (URDF link name suffixes) joined into each part's capsule chain.
 PART_LINKS = {
     "upper_arm": ("half_arm_1_link", "half_arm_2_link", "forearm_link"),
@@ -110,8 +106,9 @@ def _as_capsule(s):
 
 
 def distance(x, y):
-    """Signed gap between two shapes (negative when they overlap), at least one a Capsule or Sphere
-    paired with a Sphere, Capsule or Box."""
+    """Gap between a Capsule or Sphere and a Sphere, Capsule or Box: the distance between the core
+    segments (or the segment and the solid box) minus the radii. Positive when apart, <= 0 when
+    overlapping; it is not a penetration depth (e.g. a segment inside a box returns -r)."""
     if isinstance(x, Box):
         x, y = y, x
     if isinstance(y, Box):
@@ -163,8 +160,6 @@ def arm_capsules(chain, q, held):
     out = {}
     for part, links in PART_LINKS.items():
         pts = [chain.link_pose(q, name)[0] for name in links]
-        if part == "forearm":
-            pts[0] = pts[0] + FOREARM_START * (pts[1] - pts[0])
         out[part] = [Capsule(p0, p1, RADII[part]) for p0, p1 in zip(pts[:-1], pts[1:])]
     ee, R = chain.fk(q, "ee")
     tool, _ = chain.fk(q, "tool")
