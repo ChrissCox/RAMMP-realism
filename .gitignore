@@ -3,3 +3,5 @@ __pycache__/
 spike/media/_work/
 .pytest_cache/
 .ruff_cache/
+spike/media/*.gif
+spike/media/*_peaks.png

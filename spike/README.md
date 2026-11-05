@@ -39,12 +39,26 @@ far it moves the eye and the mouth (the farther fingertip) on screen in the clos
 
 | clip | what it shows |
 |---|---|
+| `idle_alive` | 9.6 s at home: breathing, hello to the user, a curious tilt, a look at the container, back to forward |
+| `curious_tilt` | at home the container catches its eye: a look, two sniffs, a double head tilt, a breath |
+| `doze_wake` | nothing to do: it dozes off; a task request wakes it: startle, stretch, a nod to the user |
+| `eager_start` | the start of run 132745, plain vs Puppy Mode: eager at the request, a wind-up, the recorded move, a follow-through (4.4 s -> 10.1 s, no budget) |
+| `anticipation_pair` | a scripted free move, plain vs Puppy Mode: a wind-up before and a follow-through after, at no time cost |
+| `lock_on_view` | run 132745's approach: a lean-in stare at the view pose before the reach (the first robot version; +0.9 s) |
+| `lock_on_standoff` | the same with a stop at the 10 cm standoff and a x0.75 creep (needs the reach split into two calls; +3.7 s) |
+| `boop_button` | a scripted button press, plain vs Puppy Mode: a focused crouch and stare, the press, a happy wag with chomps (+5.8 s, demo budget) |
+| `success_proud` | proud while holding (level, no wag) and proud empty-handed (wag and chomps) (+5.7 s, demo budget) |
+| `oops_retry` | illustrative: a miss, then freeze, double take, sorry, puppy eyes, shake-off, a wind-up and a retry (no budget, +13.4 s) |
+| `wag_compare` | the same wag inside today's envelope vs the 'snappy' wrist (3 vs 9 rad/s^2) |
 | `replay_plain` | the real run `grab_container_20261029_132745` replayed with no personality (counter camera) |
-| `replay_pair` | the same run plain and through the director side by side: beats only between moves, the 'demo' budget, the lock-on at the view pose (15.1 s plain, 18.6 s Puppy Mode) |
-| `idle_alive` | 9 s at home: breathing, a glance at the user, a curious tilt while looking, a look at the container, back to forward |
+| `replay_pair` | that run plain and through the director side by side: beats only between moves, the 'demo' budget, the lock-on at the view pose (15.1 s plain, 20.7 s Puppy Mode) |
+| `failure_pair` | the real refusal in run 191809 ("frames disagree > 1 cm"): curious, lock-on, puzzled, sorry, shake-off (14.5 s -> 20.4 s; eager start left out to fit) |
 | `reel_at_rest` | breathe, micro-life, gaze, head tilt, perk, droop with puppy eyes, doze and wake, each once at home, its name in the chip |
 | `reel_reactions` | nod, bounce, wiggle, clack, sniff, double take, search, startle, shake off, proud |
 | `reel_craft` | wind-up, follow-through and lock-on between scripted moves; the lead gaze rides on one (labelled 'later: in motion') |
+
+Some clips register their own camera from the clip module (`lock_on`, `boop`, `oops_follow`,
+`wag_close`) with `render.CAMERAS.setdefault`.
 
 The overlays are the title, the current beat (mood chip), and a timeline bar colored by zone
 (green FREE, amber NEAR_USER, blue PRECISION, labeled "focus: timing only"). A pair clip has a
@@ -76,9 +90,10 @@ left shoulder at head height: what the user sees; from home the face looks at th
 - **User and wheelchair: assumed and approximate.** They are stylized, using the numbers from the
   fridge keep-out and tf: seat at z -0.27, chair centerline y -0.32, head at (-0.27, -0.32, 0.50).
   The mannequin is plain, with no face.
-- **Button panel: placed for a later clip.** It stands on the counter. The press poses (closed
-  fingertips along the panel normal, 2 cm standoff) are reachable by IK (`Scene.press_targets`,
-  tested).
+- **Button panel: placed, and the press is scripted.** It stands on the counter. The press poses
+  (closed fingertips along the panel normal, 2 cm standoff) are reachable by IK
+  (`Scene.press_targets`, tested); `boop_button` scripts the press from them because there are no
+  recorded button-press runs.
 
 ## The motion model
 
@@ -172,12 +187,16 @@ a puzzled search and a droop (puppy eyes and a shake-off in full).
   which then runs as recorded. `lock_on='standoff'` is the old one: stop at the pre-grasp standoff,
   stare, creep in at x0.75; it needs the capability to split its approach into two calls, and
   `check` reports the samples it retimes.
-- **Budgets, event by event.** 'demo' allows 6 s per task, 'subtle' 2.5 s (`budget=None`: no
-  limit). Each event is decided when it arrives, from the time spent so far: a beat plays in full if
-  its whole length (plus the margins it may need) fits the time left less what is held back for
-  more important beats still to come, else its short version, else it is dropped. The stop is then
-  charged what it really added. The director cannot know how long the arm will wait anyway, so a
-  beat is priced at its full length; the log lists every decision.
+- **Budgets, event by event.** 'demo' allows 6 s per task, 'subtle' 2.5 s and plays only the most
+  important beats (`budget=None`: no limit). Each event is decided when it arrives, from the time
+  spent so far: a beat plays in full if it fits the time left less what is held back for more
+  important beats still to come (only the larger of the success and failure endings is held back),
+  else its short version, else it is dropped. A beat is priced at what its stop would add as far as
+  the director knows: a beat before a move exactly (the move's start is known), a beat after an
+  arrival as if a precise move followed at once, and after the task ends up to an assumed next
+  command 1.9 s later (`NEXT_COMMAND_S`; the replays keep 2 s after the end). The stop is then
+  charged what it really added, ramps included; the log lists every decision, and a test holds the
+  decisions on any prefix of the events equal to those on the whole run.
 
 Unknown phases are PRECISION and get no beat, and every beat is fenced out of PRECISION, so no
 spatial offset ever lands on a precise sample (tested on all three runs).
@@ -203,11 +222,12 @@ spatial offset ever lands on a precise sample (tested on all three runs).
   part. Overlapping moves stack their accelerations, so compound beats sequence their parts (a
   proud lift rides with its look as one move).
 - **Puppy Mode costs time, and the robot cannot know how long it will wait anyway.** Every look and
-  back is about 2 s, so a 6 s budget priced at full length buys about three beats: on 132745 the
-  curious tilt, the lock-on stare and a short proud (15.1 s -> 18.6 s); on the failure run 191809
-  the curious tilt, a search and a droop (19.9 s -> 23.4 s). 'subtle' keeps the stare (15.7 s) or
-  the droop (20.1 s). Priced at what they would really add, the same budget would fit about two
-  more beats: the stops while the gripper opens or the planner plans (0.3-1.7 s) go unused.
+  back is about 2 s. With 'demo' (6 s): on 132745 an eager perk, the curious tilt, a short lock-on,
+  a short wind-up and a short proud (15.1 s -> 20.7 s); on the failure run 191809 the eager perk,
+  the curious tilt, a free stare before detect, a one-spot search and a sorry with puppy eyes, with
+  no room for the shake-off (19.9 s -> 25.3 s). 'subtle' keeps a short stare and a short proud
+  (16.1 s) or a short sorry (20.1 s). A full apology (search, droop with puppy eyes, shake-off)
+  needs about 6.6 s on its own, more than the whole demo budget if the task also started eagerly.
 - **At the counter the face is turned on its side.** A look at the user from there is a pan (the
   user is behind it): about 1.3 s for 20 deg while holding, where the pan is also what keeps the
   container level. Seen from beyond the counter, a curious tilt at the view pose rolls the face

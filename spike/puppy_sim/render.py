@@ -61,6 +61,15 @@ MOOD_COLORS = {
     "PUZZLED": (250, 196, 62),
     "SORRY": (150, 140, 200),
     "SHAKE IT OFF": (120, 200, 190),
+    "TASK REQUESTED": (244, 162, 97),  # the gallery clips' chips, by the same families
+    "AWAKE": (244, 162, 97),
+    "LOCK ON": (84, 132, 230),
+    "FREEZE": (84, 132, 230),
+    "WIND UP": (130, 170, 210),
+    "FOLLOW THROUGH": (130, 170, 210),
+    "DOUBLE TAKE": (250, 196, 62),
+    "PUPPY EYES": (150, 140, 200),
+    "SLEEPY": (150, 160, 210),
 }
 DEFAULT_MOOD_COLOR = (160, 170, 185)
 PLATE_RGBA = (14, 18, 26, 178)
@@ -282,9 +291,9 @@ def overlay_single(img, title, subtitle, track, t, mood, show_title=True):
     return Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
 
 
-def overlay_side(img, title, subtitle, plain, puppy, t, mood, show_title=True):
-    """Two panels: a header with its own clock and a timeline per panel, the title (unless
-    show_title is False) over the left, the mood on the right."""
+def overlay_side(img, title, subtitle, plain, puppy, t, mood, show_title=True, headers=PAIR_HEADERS):
+    """Two panels: a header (headers: the two sides' labels) with its own clock and a timeline per
+    panel, the title (unless show_title is False) over the left, the mood on the right."""
     s = img.width / (2 * PANEL_SIZE[0])
     half = img.width // 2
     layer = Image.new("RGBA", img.size)
@@ -293,7 +302,7 @@ def overlay_side(img, title, subtitle, plain, puppy, t, mood, show_title=True):
     if show_title:
         draw_title(draw, title, subtitle, s)
     draw_mood(draw, mood, img.width - int(22 * s), s)
-    for k, (track, header) in enumerate(zip((plain, puppy), PAIR_HEADERS)):
+    for k, (track, header) in enumerate(zip((plain, puppy), headers)):
         x0 = k * half + int(30 * s)
         draw_timeline(draw, track, t, x0, x0 + half - int(60 * s), img.height, s, header)
     return Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
@@ -335,7 +344,8 @@ class Reel:
             beat = self.tracks[-1].beat_at(t)
             mood = beat.name if beat else self.clip.mood
         if self.kind == "side":
-            return overlay_side(img, self.clip.title, self.subtitle, *self.tracks, t, mood, title)
+            headers = getattr(self.clip, "headers", None) or PAIR_HEADERS
+            return overlay_side(img, self.clip.title, self.subtitle, *self.tracks, t, mood, title, headers)
         return overlay_single(img, self.clip.title, self.subtitle, self.tracks[0], t, mood, title)
 
     def frame(self, k, title=True):

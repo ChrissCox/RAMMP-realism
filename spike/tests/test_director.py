@@ -136,9 +136,23 @@ def test_several_rules_on_one_event_all_play_in_table_order(sc, functionals, mon
 
 
 def test_the_success_run_gets_its_beats_in_order(sc, functionals, directed):
-    assert _beats(directed[SUCCESS][1]) == ["CURIOUS", "FOCUS", "PROUD"]
+    """demo: an eager perk, the curious tilt, the stare after detect, a wind-up before the reach and
+    a proud look; with no budget every filler and every full version too."""
+    demo = ["EAGER", "CURIOUS", "FOCUS", "LOCK ON", "WIND UP", "FOCUS", "PROUD"]
+    assert _beats(directed[SUCCESS][1]) == demo
     every, _ = D.direct_track(functionals[SUCCESS], "grab_container", sc, sc.kin(), budget=None)
-    assert _beats(every) == ["EAGER", "CURIOUS", "FOCUS", "PROUD", "ATTENTIVE"]
+    assert _beats(every) == [
+        "EAGER",
+        "WIND UP",
+        "FOLLOW THROUGH",
+        "CURIOUS",
+        "FOCUS",
+        "LOCK ON",
+        "WIND UP",
+        "FOCUS",
+        "PROUD",
+        "ATTENTIVE",
+    ]
 
 
 def test_the_failure_run_looks_puzzled_and_droops(directed):
@@ -157,15 +171,17 @@ def test_a_budget_is_never_exceeded(sc, functionals, name, budget):
 
 
 def test_a_tighter_budget_shrinks_and_drops_the_less_important_beats_first(sc, functionals):
-    """subtle keeps only the most important (the lock-on stare); demo adds the reaction and the
-    curious tilt; no budget plays everything."""
+    """subtle keeps only the most important (the lock-on stare and the ending); demo adds the eager
+    perk, the curious tilt and a wind-up; no budget plays everything (the attentive tail, the
+    follow-throughs)."""
     k = sc.kin()
     sets = [
         set(_beats(D.direct_track(functionals[SUCCESS], "grab_container", sc, k, budget=b)[0]))
         for b in ("subtle", "demo", None)
     ]
     assert sets[0] < sets[1] < sets[2]
-    assert "FOCUS" in sets[0] and {"PROUD", "CURIOUS"} <= sets[1] and "EAGER" not in sets[1]
+    assert {"LOCK ON", "PROUD"} <= sets[0] and {"EAGER", "CURIOUS", "WIND UP"} <= sets[1] - sets[0]
+    assert {"ATTENTIVE", "FOLLOW THROUGH"} <= sets[2] - sets[1]
 
 
 @pytest.mark.parametrize("name", (SUCCESS, FAILURE))
@@ -186,7 +202,7 @@ def test_lock_on_at_the_view_pose_stares_before_the_approach(directed):
     """Default: the stare plays in the stop after detect, before the approach starts (one blended
     call), and the approach then runs at full speed."""
     func, puppy, _ = directed[SUCCESS]
-    focus = [b for b in puppy.beats if b.name == "FOCUS" and puppy.zone[int(b.t0 / DT)] != PRECISION]
+    focus = [b for b in puppy.beats if b.name == "LOCK ON"]
     assert len(focus) == 1
     stare = focus[0]
     detect = next(p for p in puppy.phases if p.name == "detect")
@@ -260,3 +276,107 @@ def test_direct_returns_the_plain_track_and_is_deterministic(sc):
     plain2, puppy2 = D.direct(run, sc)
     assert plain.q.tobytes() == runs.functional_track(run, sc.kin()).q.tobytes()
     assert puppy.q.tobytes() == puppy2.q.tobytes()
+
+
+# --------------------------------------------------------------------- the ledger, event by event
+def _view_rules(drop=()):
+    return [
+        r
+        for r in D.RULES["grab_container"]
+        if r.tier == D.BOUNDARY and r.lock_on in (None, "view") and r.event not in drop
+    ]
+
+
+@pytest.mark.parametrize("budget", sorted(D.BUDGETS))
+@pytest.mark.parametrize("name", RUNS)
+def test_the_ledger_charges_what_the_pauses_really_add(sc, functionals, name, budget):
+    """Each stop is charged its pause with the ramps into and out of it (a hold adds more than its
+    hold_s), so the later decisions see the time really left."""
+    func = functionals[name]
+    k = sc.kin()
+    planned = D.plan(func, D.find_events(func, k), _view_rules(), sc, k, budget=D.BUDGETS[budget])
+    assert planned.spent == pytest.approx(D._added_s(func, planned.holds, planned.slows), abs=1e-9)
+    assert planned.spent <= D.BUDGETS[budget].seconds + 1e-9
+
+
+def test_demo_spends_most_of_its_budget_on_the_success_run(directed):
+    """Priced at what each stop adds as far as the director knows it (and the ending past the next
+    command's earliest time), 'demo' fills most of its 6 s on the reference run."""
+    func, puppy, _ = directed[SUCCESS]
+    assert 0.85 * D.BUDGETS["demo"].seconds <= puppy.duration - func.duration <= D.BUDGETS["demo"].seconds
+
+
+@pytest.mark.parametrize("name", RUNS)
+def test_the_next_command_is_never_sooner_on_the_replays(sc, functionals, name):
+    """An ending reaction is priced as if the next command came NEXT_COMMAND_S after the task
+    ended: on every replay the arm is still at least that long, so the price never falls short."""
+    func = functionals[name]
+    stages, events = D.find_events(func, sc.kin())
+    end = next(e for e in events if e.name.removeprefix("phase:") in D.TERMINAL_PHASES)
+    t_end = next(p.t0 for p in func.phases if p.name == end.name.removeprefix("phase:"))
+    assert stages[end.stage].t1 >= t_end + D.NEXT_COMMAND_S
+
+
+def test_a_free_beat_plays_only_where_the_arm_waits_anyway(sc, functionals, directed):
+    """The stare before detect is free: on the failure run the arm waits 4.4 s at the view pose and
+    it plays there, before detect, adding nothing; on the success run that stop is 0.4 s and it
+    does not play (the stare comes after detect, while the gripper opens)."""
+    _, failed, _ = directed[FAILURE]
+    detect = next(p for p in failed.phases if p.name == "detect")
+    stares = [b for b in failed.beats if b.name == "LOCK ON"]
+    assert len(stares) == 1 and stares[0].t1 <= detect.t0
+    func = functionals[FAILURE]
+    k = sc.kin()
+    found = D.find_events(func, k)
+    added = [
+        D.plan(func, found, rules, sc, k, budget=D.BUDGETS["demo"]).spent
+        for rules in (_view_rules(), _view_rules(drop=("precise_next",)))
+    ]
+    assert added[0] == pytest.approx(added[1], abs=1e-9)
+    _, success, _ = directed[SUCCESS]
+    detect = next(p for p in success.phases if p.name == "detect")
+    assert all(b.t0 >= detect.t1 for b in success.beats if b.name == "LOCK ON")
+
+
+def test_subtle_plays_only_the_beats_that_matter_most(sc, functionals):
+    """'subtle' plays nothing below its priority floor: the stare and a short proud look on the
+    success run, a short droop on the failure run."""
+    k = sc.kin()
+    success = set(_beats(D.direct_track(functionals[SUCCESS], "grab_container", sc, k, budget="subtle")[0]))
+    failure = set(_beats(D.direct_track(functionals[FAILURE], "grab_container", sc, k, budget="subtle")[0]))
+    assert success == {"FOCUS", "LOCK ON", "PROUD"} and failure == {"FOCUS", "SORRY"}
+
+
+def test_the_full_apology_needs_the_budget_the_eager_start_takes(sc, functionals, directed):
+    """On the failure run 'demo' spends ~1.6 s on the eager perk before it can know the task will
+    fail, and the shake-off no longer fits; left out (with the fillers), the whole apology plays."""
+    assert _beats(directed[FAILURE][1])[-2:] == ["PUZZLED", "SORRY"]
+    skip = ("eager", "wind_up", "follow_through")
+    puppy, _ = D.direct_track(functionals[FAILURE], "grab_container", sc, sc.kin(), skip=skip)
+    names = _beats(puppy)
+    assert "EAGER" not in names and names[-3:] == ["PUZZLED", "SORRY", "SHAKE IT OFF"]
+    assert puppy.duration - functionals[FAILURE].duration <= D.BUDGETS["demo"].seconds + 1e-9
+    with pytest.raises(ValueError):
+        D.direct_track(functionals[FAILURE], "grab_container", sc, sc.kin(), skip=("nap",))
+
+
+def test_a_beat_before_a_move_starts_after_the_tasks_last_event(sc, functionals):
+    """A wind-up ends at its move but starts no earlier than the last task event in its stop: on
+    the failure run with no eager perk, the first wind-up starts once the user has asked."""
+    func = functionals[FAILURE]
+    puppy, _ = D.direct_track(func, "grab_container", sc, sc.kin(), skip=("eager",))
+    asked = next(p.t0 for p in func.phases if p.name != "idle")
+    assert min(b.t0 for b in puppy.beats if b.name == "WIND UP") >= asked
+
+
+def test_an_excerpt_keeps_every_check(sc, directed):
+    """A window of a directed pair: the plain samples there and the Puppy Mode samples that play
+    them, both from 0, the source cut alike, passing every check, adding at most what the run adds."""
+    func, puppy, _ = directed[SUCCESS]
+    plain, cut = D.excerpt(func, puppy, 4.5, 13.0)
+    assert plain.duration == pytest.approx(8.5) and cut.func.source is plain
+    assert 0.0 < cut.duration - plain.duration <= puppy.duration - func.duration + 1e-9
+    assert cut.tier == puppy.tier and cut.budget is puppy.budget
+    for track in (plain, cut):
+        failed = [(c.name, c.shown) for c in checks.check_track(track, sc.kin()) if not c.ok]
+        assert not failed

@@ -169,6 +169,18 @@ Time budgets are absolute, because the robot cannot know a task's length in adva
 most 6 s per task, and `subtle` at most 2.5 s. When a beat would exceed the budget it shrinks first,
 then is dropped in a fixed priority order. Lock-on and the success or failure reaction go last.
 
+A beat is priced at what it would add as far as the director knows at that moment:
+
+- A beat before a move is priced exactly, because the move is about to be called.
+- A beat after an arrival is priced as if a precise move followed at once.
+- After the task ends, it is priced up to an assumed next command 1.9 s later *(call; the robot
+  version should measure this)*.
+
+Only the larger of the success and failure endings is held back. In the simulator this spends 5.6 of
+the 6 s on the successful run (15.1 s → 20.7 s). A full apology (search, droop with puppy eyes,
+shake-off) needs about 6.6 s on its own, so on a failed task that started eagerly the shake-off
+drops.
+
 A failure reaction plays only on a recoverable `EngineError`. The recorded failure (run
 2026-10-28 19:18:09) is one: "grab failed: frames disagree > 1 cm -- not grasping -- the arm holds
 where it is". grab_container raises that refusal as recoverable.

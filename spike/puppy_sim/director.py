@@ -16,15 +16,24 @@ tiers=(BOUNDARY, IN_MOTION).
 
 The lock-on. grab_container's approach (view -> pre-grasp -> grasp) is one blended driver call. By
 default (lock_on='view') the stare plays at the view pose once detect is done, while the gripper
-opens, before the approach starts. lock_on='standoff' stops at the pre-grasp standoff instead and
-creeps in at x0.75: that needs the capability to split its approach into two calls.
+opens, before the approach starts (and, where the arm waits at the view pose before detect anyway,
+there too: a free beat). lock_on='standoff' stops at the pre-grasp standoff instead and creeps in at
+x0.75: that needs the capability to split its approach into two calls.
 
-Budgets (BUDGETS: seconds per task). Each event is decided when it arrives, from what has happened
-so far: its beat plays in full if its whole length fits the time left (the arm may be ready to move
-on at once: the director cannot know), less what is held back (reserve_s) for more important beats
-whose events have not come yet; else its short version if that fits; else it is dropped. Once the
-arm would have moved on, the beat is charged what it really added. Lower-priority beats shrink and
-drop first, and the budget is never exceeded.
+Budgets (BUDGETS: seconds per task, and the least priority that plays at all). Each event is decided
+when it arrives, from what has happened so far. A beat is priced at what its stop would then add as
+far as the director knows the stop: as if the arm moved on right after now into something precise
+(it cannot know when or what); exactly once the arm is about to move (a BEFORE beat: the stop's whole
+length is known then); and once the task has ended, as if its next command came NEXT_COMMAND_S
+later (an assumption about the user; a replay keeps 2 s past the end). A version fits if its stop,
+with the short versions of the more important beats still to decide at this event, fits the time
+left less what is held back (reserve_s: about what they usually add) for more important beats at
+later events (of the two endings, success and failure, only the larger: one of them plays). A beat
+plays in full if that fits at its full version's priority (full_keep: the extra length is worth
+less), else in short at its own, else not at all. When the arm moves on the stop is charged what it
+really added, its ramps included, so the budget is never exceeded, and what a stop did not use goes
+to the beats after it. A BEFORE beat starts no earlier than the last task event in its stop (the
+director learns then what comes next).
 
 A phase the table does not know is PRECISION (runs.zone_of) and gets no beat. Every beat is fenced:
 faded to exactly zero before any PRECISION sample (noted in the log if that ever changes it). The
@@ -50,6 +59,7 @@ from .timeline import (
     Hold,
     Label,
     Slow,
+    Track,
     constant_track,
     hold_ramp_s,
     joint_speed,
@@ -62,9 +72,24 @@ from .timeline import (
 STANDOFF = "standoff"  # a directed track's tier with lock_on='standoff': boundary beats, the approach split
 AFTER, BEFORE, SPAN = "after", "before", "span"  # a beat starts at its event / ends at it / spans it
 FULL, SHORT = "full", "short"
+VERSIONS = (FULL, SHORT)  # tried in this order
+SUCCESS, FAILURE = "success", "failure"  # a task's two endings: only one of them plays
 LOCK_ON_MODES = ("view", "standoff")
-BUDGETS = {"demo": Budget("demo", 6.0), "subtle": Budget("subtle", 2.5)}
+
+
+@dataclass(frozen=True)
+class Allowance(Budget):
+    """A director's budget: `seconds` a task may gain, and min_keep, the least priority (Rule.keep)
+    a beat needs to play at all under it (a subtle budget keeps only the beats that matter most)."""
+
+    min_keep: int = 0
+
+
+BUDGETS = {"demo": Allowance("demo", 6.0), "subtle": Allowance("subtle", 2.5, min_keep=6)}
 DEFAULT_BUDGET = "demo"
+NEXT_COMMAND_S = 1.9  # once a task has ended its next command is assumed no sooner than this (a replay
+# keeps runs.TAIL_S = 2 s past the end): an ending reaction is charged only for what runs past it
+EPS = 1e-9
 
 STOP_MIN_S = 0.2  # ... for at least this long (or across a phase change): between two moves
 STILL_MARGIN_S = 0.1  # boundary beats start this long after the arm stops and end this long before it moves
@@ -98,54 +123,72 @@ WIND_UP_SHORT = 0.6  # the short wind-up draws back this share as far (and quick
 FOLLOW_SHORT_S = 0.9  # the short follow-through settles this fast
 LOCK_STARE_S = 0.6  # the lock-on's stillness once it has leaned in (short: LOCK_STARE_SHORT_S)
 LOCK_STARE_SHORT_S = 0.2
+LOCK_LEAN_M = 0.025  # the full lock-on leans in this far toward the container (short: B.LOCK_LEAN_M)
 PROUD_HOLD_S = 0.2  # proud looks at the user this long (in full a bob, or a tilt and a flourish)
 PROUD_FLOURISH_S = 1.2  # ... or, in full, this long
 PROUD_LOOK_MAX_RAD = np.radians(12.0)
 ATTENTIVE_HOLD_S = 0.8  # the full proud keeps looking at the user this much longer: the attentive tail
-SORRY_GAP_S = 0.15
 SEARCH_SPOTS = B.SEARCH_SPOTS[:2]
 SEARCH_SHORT_SPOTS = B.SEARCH_SPOTS[:1]
-SORRY_EYES_AFTER_S = 1.0  # the sheepish look up starts once the droop is down
-SORRY_EYES_HOLD_S = 0.5
-SORRY_LINGER_S = 0.3  # drooped a moment longer once the eyes are down again
+SORRY_QUICK = 0.8  # the full sorry sags this much quicker than a droop's design (paced to the caps)
+SORRY_EYES_AFTER_S = 0.7  # the sheepish look up at the user starts as the droop arrives
+SORRY_EYES_HOLD_S = 0.3  # held this long; then the eyes come down as the droop lifts (one move back)
+SORRY_LINGER_S = 0.3  # the short sorry stays drooped this long
 SORRY_SHORT_SAG = 0.5  # the short sorry: a droop this share as deep (and quicker), held SORRY_LINGER_S
+SHAKE_GAP_S = 0.05  # the shake-off starts this long after the sorry
+SHAKE_CYCLES, SHAKE_SHORT_CYCLES = 3.0, 2.0
 
 
 @dataclass(frozen=True)
 class Rule:
     """event: a task event (find_events). beat: what plays (BEATS). mood: the chip it shows. tier:
-    BOUNDARY or IN_MOTION. keep: its priority (a tight budget shrinks and drops lower ones first).
-    reserve_s: held back for it from less important beats until its event comes (enough for its
-    short version where it is protected, else about what it usually adds). lock_on: it plays only
-    under that lock_on mode (None: always). pause_s, slow: a rule on a SPAN event that stops the
-    task at it for pause_s (short: half) and then runs the span at `slow` (the standoff lock-on)."""
+    BOUNDARY or IN_MOTION. keep: its priority (a tight budget shrinks and drops lower ones first);
+    full_keep: its full version's (None: keep), so a beat can matter in short and its extra length
+    little. reserve_s: held back for it from less important beats until its event comes (about what
+    it usually adds). outcome: SUCCESS or FAILURE for an ending reaction (only one ending plays, so
+    only the larger outcome is held back). free: it plays only where it adds no time (the arm waits
+    there anyway). lock_on: it plays only under that lock_on mode (None: always). pause_s, slow: a
+    rule on a SPAN event that stops the task at it for pause_s (short: half) and then runs the span
+    at `slow` (the standoff lock-on)."""
 
     event: str
     beat: str
     mood: str | None = None
     tier: str = BOUNDARY
     keep: int = 0
+    full_keep: int | None = None
     reserve_s: float = 0.0
+    outcome: str | None = None
+    free: bool = False
     lock_on: str | None = None
     pause_s: float = 0.0
     slow: float = 1.0
 
+    def level(self, version):
+        """The priority a version of this rule plays at."""
+        return self.keep if version == SHORT or self.full_keep is None else self.full_keep
+
 
 RULES = {
+    # Priorities: the stare (7); the ending, success or failure (6); the eager perk and the puzzled
+    # look (5); the curious tilt (4); the shake-off (4); the fillers, a wind-up or a follow-through
+    # (1-2). A full version is worth less than its short one (full_keep), so a beat shrinks first.
     "grab_container": (
-        Rule("requested", "eager", "EAGER", keep=3),  # a perk; full: a glance at the user
-        Rule("transit_start", "wind_up", keep=1),  # a draw-back against the coming move, before it
+        Rule("requested", "eager", "EAGER", keep=5, full_keep=2),  # a perk; full: a glance at the user, rising
+        Rule("transit_start", "wind_up", "WIND UP", keep=1),  # a draw-back against the coming move, before it
         Rule("transit", "lead_gaze", tier=IN_MOTION),  # look where it is going (rides on the move)
-        Rule("arrived", "follow_through", keep=2),  # once still: carry on a little and settle
-        Rule("arrived_view", "curious", "CURIOUS", keep=4, reserve_s=2.4),  # a tilt; full: sniffs at the container
+        Rule("arrived", "follow_through", "FOLLOW THROUGH", keep=2, full_keep=1, reserve_s=0.3),  # carry on, settle
+        Rule("arrived_view", "curious", "CURIOUS", keep=4, full_keep=2, reserve_s=2.5),  # a tilt; full: and sniffs
         Rule("precision", "stillness", "FOCUS"),  # detect, the final approach, close, raise
-        Rule("phase:open", "lock_on", "FOCUS", keep=7, reserve_s=0.5, lock_on="view"),  # the stare, at the view pose
+        Rule("precise_next", "lock_on", "LOCK ON", keep=5, free=True, lock_on="view"),  # the stare, waiting to detect
+        Rule("phase:open", "lock_on", "LOCK ON", keep=7, reserve_s=0.6, lock_on="view"),  # the stare, at the view pose
         Rule(  # stop at the standoff, stare, creep in (needs the approach in two calls)
-            "final_approach", "lock_on", "FOCUS", keep=7, reserve_s=1.6, lock_on="standoff", pause_s=1.6, slow=0.75
+            "final_approach", "lock_on", "LOCK ON", keep=7, reserve_s=1.6, lock_on="standoff", pause_s=1.6, slow=0.75
         ),
-        Rule("raised", "proud", "PROUD", keep=6, reserve_s=3.0),  # muted while holding; full: a bob, an attentive tail
-        Rule("phase:aborted", "search", "PUZZLED", keep=3),  # a puzzled look around the counter
-        Rule("phase:aborted", "sorry", keep=6, reserve_s=3.0),  # a droop; full: puppy eyes, shake it off
+        Rule("raised", "proud", "PROUD", keep=6, full_keep=3, reserve_s=1.0, outcome=SUCCESS),  # full: a bob, attentive
+        Rule("phase:aborted", "search", "PUZZLED", keep=5, full_keep=2, outcome=FAILURE),  # a look around the counter
+        Rule("phase:aborted", "sorry", keep=6, full_keep=5, reserve_s=0.9, outcome=FAILURE),  # a droop; full: eyes up
+        Rule("phase:aborted", "shake_off", "SHAKE IT OFF", keep=4, reserve_s=0.3, outcome=FAILURE),  # then shake off
     ),
 }
 
@@ -244,6 +287,8 @@ def find_events(track, kin):
         events += [
             Event(f"phase:{p.name}", max(p.t0, s.t0), AFTER, stage=k) for p in track.phases if reach <= p.t0 <= s.t1
         ]
+        if s.after == "precision":  # the stop ends as something precise starts (detect, at the view pose)
+            events.append(Event("precise_next", s.t1, BEFORE, stage=k))
     eye = kin.fk_track(track.q, "eye")[0]
     for a, b in _runs((in_stage < 0) & (track.zone != PRECISION)):
         if np.linalg.norm(eye[a : b + 1] - eye[a], axis=1).max() >= TRANSIT_MIN_M:
@@ -343,11 +388,13 @@ def _stillness(ctx, t0, t1, short=False):
 
 
 def _lock_on(ctx, t0, t1, short=False):
-    return [B.lock_on(ctx, ctx.container, t0, t1)]
+    """A lean toward the container and a stare (the full one leans further and stares longer)."""
+    return [B.lock_on(ctx, ctx.container, t0, t1, lean_m=B.LOCK_LEAN_M if short else LOCK_LEAN_M)]
 
 
 def _lock_on_s(ctx, ev, short=False):
-    return B.lock_on_s(ctx, ctx.container, ev.t, LOCK_STARE_SHORT_S if short else LOCK_STARE_S)
+    stare, lean = (LOCK_STARE_SHORT_S, B.LOCK_LEAN_M) if short else (LOCK_STARE_S, LOCK_LEAN_M)
+    return B.lock_on_s(ctx, ctx.container, ev.t, stare, lean_m=lean)
 
 
 def _proud(ctx, t0, t1, short=False):
@@ -371,20 +418,25 @@ def _search(ctx, t0, t1, short=False):
 
 
 def _sorry(ctx, t0, t1, short=False):
-    """After a failure: a droop and, in full, a sheepish look up at the user while drooped and a
-    shake to shake it off after it."""
+    """After a failure: a droop and, in full, a sheepish look up at the user while drooped (puppy
+    eyes), held a moment; then the eyes come down as the droop lifts, one move back."""
     if short:
         sag_m, look_rad = B.DROOP_SAG_M * SORRY_SHORT_SAG, B.DROOP_LOOK_DOWN_RAD * SORRY_SHORT_SAG
         quick = np.sqrt(SORRY_SHORT_SAG)
         sag = B.droop(ctx, t0, t0 + B.DROOP_S * quick + SORRY_LINGER_S, sag_m, look_rad, quick=quick)
         return [sag, ctx.empty("sorry", [Label("SORRY", t0, _end(sag, t0))])]
     t_eyes = t0 + SORRY_EYES_AFTER_S
-    eyes = B.puppy_eyes(ctx, t_eyes, t_eyes + SORRY_EYES_HOLD_S)
-    t_lift = _end(eyes, t_eyes) + SORRY_LINGER_S
-    sag = B.droop(ctx, t0, t_lift)
-    t_shake = _end(sag, t_lift) + SORRY_GAP_S
-    sorry = ctx.empty("sorry", [Label("SORRY", t0, t_shake)])
-    return [sag, eyes, sorry, B.shake_off(ctx, t_shake, beat="SHAKE IT OFF")]
+    turn_s = (_end(B.puppy_eyes(ctx, t_eyes, t_eyes), t_eyes) - t_eyes) / 2.0  # up and straight back
+    t_back = t_eyes + turn_s + SORRY_EYES_HOLD_S
+    eyes = B.puppy_eyes(ctx, t_eyes, t_back)
+    sag = B.droop(ctx, t0, t_back, quick=SORRY_QUICK)
+    end = max(_end(eyes, t_back), _end(sag, t_back))
+    return [sag, eyes, ctx.empty("sorry", [Label("SORRY", t0, end)])]
+
+
+def _shake_off(ctx, t0, t1, short=False):
+    """Once the sorry is over: shake it off, like a dog shaking off water."""
+    return [B.shake_off(ctx, t0 + SHAKE_GAP_S, cycles=SHAKE_SHORT_CYCLES if short else SHAKE_CYCLES)]
 
 
 def _end(c, default):
@@ -413,6 +465,7 @@ BEATS = {
     "proud": Beat(_proud),
     "search": Beat(_search),
     "sorry": Beat(_sorry),
+    "shake_off": Beat(_shake_off),
 }
 
 
@@ -430,38 +483,58 @@ class Slot:
 
 @dataclass
 class Ledger:
-    """The time budget as the events arrive: what has been charged and which events have come."""
+    """The time budget as the events arrive: what the settled stops really added, which events
+    have come, and when the task ended (its terminal phase), once it has."""
 
     budget: Budget | None
     rules: tuple
     spent: float = 0.0
     seen: set = field(default_factory=set)
+    ended: float | None = None
     log: list = field(default_factory=list)
 
-    def held_back(self, rule):
-        """Seconds kept for rules more important than `rule` whose events have not come yet (rules
-        of one priority are alternatives, such as success and failure: the larger reserve)."""
-        levels = {}
+    def held_back(self, level):
+        """Seconds kept for rules more important than `level` whose events have not come yet: each
+        mid-task rule's reserve, plus the larger of the two endings' (an outcome's rules together:
+        only one ending plays)."""
+        mid, endings = 0.0, {}
         for r in self.rules:
-            if r.keep > rule.keep and r.event not in self.seen:
-                levels[r.keep] = max(levels.get(r.keep, 0.0), r.reserve_s)
-        return sum(levels.values())
+            if r.keep <= level or r.event in self.seen:
+                continue
+            if r.outcome is None:
+                mid += r.reserve_s
+            else:
+                endings[r.outcome] = endings.get(r.outcome, 0.0) + r.reserve_s
+        return mid + max(endings.values(), default=0.0)
 
-    def decide(self, rule, full_s, short_s, committed=0.0):
-        """The version of a beat to play (FULL, SHORT or None: drop it) when its versions may add
-        full_s and short_s; committed: what this stop's earlier beats may still add. Logged."""
-        if self.budget is None:
-            return FULL
-        left = self.budget.seconds - self.spent - committed
-        kept = self.held_back(rule)
-        if full_s <= left - kept:
-            version, cost = FULL, full_s
-        elif short_s < full_s and short_s <= left - kept:
-            version, cost = SHORT, short_s
-        else:
-            version, cost = None, 0.0
-        what = f"{version} (up to {cost:.1f} s)" if version else "dropped"
-        self.log.append(f"{rule.beat} at {rule.event}: {what}; {left:.1f} s left, {kept:.1f} s held back")
+    def decide(self, rule, costs, gains):
+        """The version of a beat to play (FULL, SHORT or None: drop it). costs: {version: what its
+        stop would then add in all, with the short versions of the more important beats of this
+        event still to decide}; gains: {version: what the beat itself adds to that} (both as far as
+        the director knows the stop). A version fits if its stop still fits the time left and,
+        unless it adds nothing, leaves what is held back for more important beats at later events.
+        A free rule plays only a version that adds nothing; a version below the budget's min_keep
+        never plays. Logged (with no budget, only a free rule's decision)."""
+        budgeted = self.budget is not None
+        left = self.budget.seconds - self.spent if budgeted else np.inf
+        floor = getattr(self.budget, "min_keep", 0)
+        version, adds, kept = None, 0.0, 0.0
+        for v in VERSIONS:
+            if (rule.free and gains[v] > EPS) or (budgeted and rule.level(v) < floor):
+                continue
+            kept = self.held_back(rule.level(v)) if budgeted else 0.0
+            if costs[v] <= left + EPS and (gains[v] <= EPS or costs[v] + kept <= left + EPS):
+                version, adds = v, gains[v]
+                break
+        if budgeted:
+            what = f"{version} (+{adds:.1f} s)" if version else "dropped"
+            if version is None and max(rule.keep, rule.level(FULL)) < floor:
+                what += f" (the '{self.budget.name}' budget plays priorities {floor} and up)"
+            self.log.append(f"{rule.beat} at {rule.event}: {what}; {left:.1f} s left, {kept:.1f} s held back")
+        elif rule.free:
+            self.log.append(
+                f"{rule.beat} at {rule.event}: {version or 'dropped'} (it plays only where it adds no time)"
+            )
         return version
 
 
@@ -479,13 +552,15 @@ class StagePlan:
 
 @dataclass(frozen=True)
 class Plan:
-    """What the director decided: per stage, the spanning slots, the time-warp and its log."""
+    """What the director decided: per stage, the spanning slots, the time-warp, its log, and the
+    seconds the ledger charged for it all (spent)."""
 
     staged: tuple
     spanned: tuple
     holds: tuple
     slows: tuple
     log: tuple
+    spent: float = 0.0
 
 
 def _measure(beat, ev, func, sc, kin, seed, caps, short):
@@ -515,90 +590,136 @@ def _standoff(func, ev, rule, stop_s):
     return Slow(ev.t, ev.t_end, rule.slow, ramp, stop_s)
 
 
-def _stage_plan(stage, after, before):
+def _stage_plan(stage, after, before, last_event=None):
     """Where a stage's beats go and the pause they need: AFTER beats one after another from their
-    events (once the arm is still), BEFORE beats one after another up to the move, and a pause for
-    whatever the stage's own stillness does not cover. The pause sits after the last AFTER event
-    (so no event moves) and keeps its ramps inside the stage."""
-    cursor, last = stage.start_margin, stage.t0
+    events (once the arm is still), BEFORE beats one after another up to the move but not before
+    the stage's last event (last_event: the director learns then what comes next; the task's
+    request, say), and a pause for whatever the stage's own stillness does not cover. The pause
+    sits after the last event (so no event moves) and keeps its ramps inside the stage."""
+    cursor, last = stage.start_margin, max(stage.t0, stage.t0 if last_event is None else last_event)
     for slot in after:
         cursor = max(cursor, slot.event.t - stage.t0) + slot.need_s
         last = max(last, slot.event.t)
+    if before:
+        cursor = max(cursor, last - stage.t0)
     need = cursor + sum(s.need_s for s in before) + stage.end_margin
     hold_s = max(0.0, need - (stage.t1 - stage.t0)) if after or before else 0.0
     at = min(max(last, stage.t0 + HOLD_EDGE * DT), stage.t1 - HOLD_EDGE * DT)
     return StagePlan(stage, tuple(after), tuple(before), round(at / DT) * DT, hold_s)
 
 
+def _hold(func, sp):
+    """The pause (timeline.Hold) a stage plan needs, eased over at least HOLD_RAMP_MIN_S."""
+    return Hold(sp.at, sp.hold_s, hold_ramp_s(func, sp.at, _accel_cap(func, sp.at), HOLD_RAMP_MIN_S))
+
+
+def _pause_s(func, hold_s):
+    """Seconds a pause of hold_s adds to the task, its ramps included (the arm is stopped in a stage,
+    so they take HOLD_RAMP_MIN_S): what the director charges for it."""
+    return _added_s(func, holds=[Hold(func.duration / 2.0, hold_s, HOLD_RAMP_MIN_S)]) if hold_s > 0.0 else 0.0
+
+
+def _until(stage, t, after):
+    """The stage as if the arm moved on right after time t (at least its first sample), into `after`."""
+    return Stage(stage.i0, max(stage.i0, _index(t)), stage.before, after)
+
+
+def _known(stage, ev, ended):
+    """The stage as far as the director knows it at event ev: all of it once the arm is about to
+    move (a BEFORE event); once the task has ended (at `ended`), until its next command, assumed
+    NEXT_COMMAND_S later (nothing precise follows); else as if the arm moved on right after now,
+    into something precise (the director cannot know when, or what comes next)."""
+    if ev.kind == BEFORE:
+        return stage
+    if ended is not None:
+        return _until(stage, max(ev.t, ended + NEXT_COMMAND_S), "end")
+    return _until(stage, ev.t, "precision")
+
+
 @dataclass
 class _Stop:
-    """The beats decided so far at the stop the arm is in, and what they may still add."""
+    """The beats decided so far at the stop the arm is in."""
 
     index: int
     after: list = field(default_factory=list)
     before: list = field(default_factory=list)
-    committed: float = 0.0
+
+    def with_slots(self, slots=()):
+        """(after, before) slot lists, with `slots` added, each to its kind."""
+        return (
+            self.after + [s for s in slots if s.event.kind != BEFORE],
+            self.before + [s for s in slots if s.event.kind == BEFORE],
+        )
 
 
 def plan(func, found, rules, sc, kin, seed=0, budget=None, caps=DEFAULT_CAPS):
     """The beats and pauses for a functional track's (stages, events), decided event by event: each
     decision sees only the events so far and the time they have added. A stop is settled (charged
-    what it really adds) when an event after it arrives: the arm has moved on."""
+    what it really adds, ramps included) when an event after it arrives: the arm has moved on."""
     stages_, events = found
     ledger = Ledger(budget, tuple(rules))
     func_ctx = B.Context.of(func, sc, kin, seed, caps)
     staged, spanned, slows = [], [], []
     stop = None
+    last_event = {}  # stage -> the time of its latest AFTER event so far
 
     def length(rule, ev, short):
         beat = BEATS[rule.beat]
         return beat.length(func_ctx, ev, short) if beat.length else _measure(beat, ev, func, sc, kin, seed, caps, short)
 
+    def slot_at(cache, rule, ev, version):
+        """A rule's slot at event ev in one version (cache: this event's, by (rule, version))."""
+        if (rule, version) not in cache:
+            cache[rule, version] = Slot(rule, ev, length(rule, ev, version == SHORT), version == SHORT)
+        return cache[rule, version]
+
+    def stage_plan(stage, index, after, before):
+        ordered = (sorted(s, key=lambda x: _play_order(rules, x)) for s in (after, before))
+        return _stage_plan(stage, *ordered, last_event.get(index))
+
+    def adds(stop, stage, slots=()):
+        """What the stop adds with its beats (and `slots`) if the stage is `stage`."""
+        return _pause_s(func, stage_plan(stage, stop.index, *stop.with_slots(slots)).hold_s)
+
     def settle(stop):
         if stop is not None and (stop.after or stop.before):
-            after, before = (sorted(slots, key=lambda s: _play_order(rules, s)) for slots in (stop.after, stop.before))
-            sp = _stage_plan(stages_[stop.index], after, before)
-            ledger.spent += sp.hold_s  # what the stop really added, now that the arm moves on
+            sp = stage_plan(stages_[stop.index], stop.index, stop.after, stop.before)
+            ledger.spent += _added_s(func, holds=[_hold(func, sp)]) if sp.hold_s > 0.0 else 0.0
             staged.append(sp)
 
     for ev in events:
         if stop is not None and ev.stage != stop.index:
             settle(stop)
             stop = None
-        if ev.name.removeprefix("phase:") in TERMINAL_PHASES:
+        if ev.kind == AFTER and ev.stage >= 0:
+            last_event[ev.stage] = max(ev.t, last_event.get(ev.stage, ev.t))
+        phase = ev.name.removeprefix("phase:")
+        ledger.seen.add(ev.name)  # its rules are decided now, the more important first
+        if ev.name.startswith("phase:") and phase in TERMINAL_PHASES and ledger.ended is None:
+            ledger.ended = _phase(func, phase).t0  # the task is over: no more events will come
             ledger.seen.update(r.event for r in rules)
-        for rule in sorted((r for r in rules if r.event == ev.name), key=lambda r: -r.keep):
+        todo = sorted((r for r in rules if r.event == ev.name), key=lambda r: -r.keep)
+        cache = {}  # (rule, version) -> its slot at this event
+        for k, rule in enumerate(todo):
             if ev.kind == SPAN:
                 slot, slow = _span_slot(rule, ev, func, ledger)
                 spanned += [slot] if slot else []
                 slows += [slow] if slow else []
             elif func.zone[min(_index(ev.t), func.n - 1)] != PRECISION:
                 stop = stop or _Stop(ev.stage)
-                slots = stop.after if ev.kind == AFTER else stop.before
-                extra = 0.0 if slots else _margins(stages_[ev.stage], ev)
-                full_s, short_s = length(rule, ev, False), length(rule, ev, True)
-                version = ledger.decide(rule, full_s + extra, short_s + extra, stop.committed)
+                stage = _known(stages_[ev.stage], ev, ledger.ended)
+                options = {v: slot_at(cache, rule, ev, v) for v in VERSIONS}
+                costs, gains = {}, {}
+                for v, slot in options.items():  # with the short versions of the more important beats to come here
+                    ahead = [slot_at(cache, r, ev, SHORT) for r in todo[k + 1 :] if r.keep > rule.level(v)]
+                    costs[v] = adds(stop, stage, [slot, *ahead])
+                    gains[v] = costs[v] - adds(stop, stage, ahead)
+                version = ledger.decide(rule, costs, gains)
                 if version is not None:
-                    need = full_s if version == FULL else short_s
-                    slots.append(Slot(rule, ev, need, version == SHORT))
-                    stop.committed += need + extra
-        ledger.seen.add(ev.name)
+                    stop.after, stop.before = stop.with_slots([options[version]])
     settle(stop)
-    holds = tuple(
-        Hold(p.at, p.hold_s, hold_ramp_s(func, p.at, _accel_cap(func, p.at), HOLD_RAMP_MIN_S))
-        for p in staged
-        if p.hold_s > 0.0
-    )
-    return Plan(tuple(staged), tuple(spanned), holds, tuple(slows), tuple(ledger.log))
-
-
-def _margins(stage, ev):
-    """The most a stop's first beat of its kind may add beyond its own length: an AFTER beat waits
-    for the arm to be still (known by now) and may need PRECISION_CLEAR_S before whatever comes
-    next (the director cannot know what or when); a BEFORE beat ends STILL_MARGIN_S before its move."""
-    if ev.kind == BEFORE:
-        return STILL_MARGIN_S
-    return max(0.0, stage.t0 + stage.start_margin - ev.t) + PRECISION_CLEAR_S
+    holds = tuple(_hold(func, p) for p in staged if p.hold_s > 0.0)
+    return Plan(tuple(staged), tuple(spanned), holds, tuple(slows), tuple(ledger.log), ledger.spent)
 
 
 def _play_order(rules, slot):
@@ -613,13 +734,13 @@ def _span_slot(rule, ev, func, ledger):
         return Slot(rule, ev, 0.0), None
     if func.zone[min(_index(ev.t), func.n - 1)] == PRECISION:
         return None, None
-    costs = [_added_s(func, slows=[_standoff(func, ev, rule, s)]) for s in (rule.pause_s, rule.pause_s / 2.0)]
-    version = ledger.decide(rule, *costs)
+    stops = {FULL: rule.pause_s, SHORT: rule.pause_s / 2.0}
+    costs = {v: _added_s(func, slows=[_standoff(func, ev, rule, s)]) for v, s in stops.items()}
+    version = ledger.decide(rule, costs, costs)
     if version is None:
         return None, None
-    stop_s = rule.pause_s if version == FULL else rule.pause_s / 2.0
-    ledger.spent += costs[0] if version == FULL else costs[1]
-    return Slot(rule, ev, stop_s, version == SHORT), _standoff(func, ev, rule, stop_s)
+    ledger.spent += costs[version]
+    return Slot(rule, ev, stops[version], version == SHORT), _standoff(func, ev, rule, stops[version])
 
 
 # ---------------------------------------------------------------------------------- windows
@@ -673,14 +794,29 @@ def direct(run, sc=None, kin=None, seed=0, **options):
 
 
 def direct_track(
-    func, capability, sc, kin, seed=0, tiers=(BOUNDARY,), budget=DEFAULT_BUDGET, lock_on="view", caps=DEFAULT_CAPS
+    func,
+    capability,
+    sc,
+    kin,
+    seed=0,
+    tiers=(BOUNDARY,),
+    budget=DEFAULT_BUDGET,
+    lock_on="view",
+    caps=DEFAULT_CAPS,
+    skip=(),
 ):
     """(puppy, contributions) for a functional track of `capability`. tiers: which rules play
     (BOUNDARY; add IN_MOTION to opt in). budget: a BUDGETS name, or None for no limit. lock_on:
-    'view' or 'standoff' (see the module doc). caps: the layer.CAP_PRESETS preset."""
+    'view' or 'standoff' (see the module doc). caps: the layer.CAP_PRESETS preset. skip: beats
+    (BEATS names) whose rules are left out, e.g. to show one beat on its own."""
     if lock_on not in LOCK_ON_MODES:
         raise ValueError(f"lock_on is one of {LOCK_ON_MODES}, not {lock_on!r}")
-    rules = tuple(r for r in RULES.get(capability, ()) if r.tier in tiers and r.lock_on in (None, lock_on))
+    unknown = set(skip) - set(BEATS)
+    if unknown:
+        raise ValueError(f"skip names beats in BEATS, not {sorted(unknown)}")
+    rules = tuple(
+        r for r in RULES.get(capability, ()) if r.tier in tiers and r.lock_on in (None, lock_on) and r.beat not in skip
+    )
     limit = None if budget is None else BUDGETS[budget]
     planned = plan(func, find_events(func, kin), rules, sc, kin, seed, limit, caps)
     warped = warp(func, planned.holds, planned.slows)
@@ -712,6 +848,45 @@ def direct_track(
         *puppy.log,
     ]
     return puppy, parts
+
+
+def excerpt(plain, puppy, t0, t1):
+    """(plain, puppy) cut to the functional window [t0, t1] (seconds of the plain task), both
+    starting at 0: the plain track's samples there, and the Puppy Mode samples that play them (its
+    warped functional track and its source cut alike, so every check still holds; its added time is
+    the window's)."""
+    i0, i1 = _index(t0), min(_index(t1), plain.n - 1)
+    base = i0 * DT
+    src = _cut(plain, np.arange(i0, i1 + 1), base, base)
+    keep = np.nonzero((puppy.tau >= base - EPS) & (puppy.tau <= i1 * DT + EPS))[0]
+    out_base = float(keep[0]) * DT
+    func = _cut(puppy.func, keep, out_base, base)
+    func.source = src
+    cut = _cut(puppy, keep, out_base, base)
+    cut.func, cut.gain = func, puppy.gain[keep]
+    cut.caps, cut.budget, cut.tier = puppy.caps, puppy.budget, puppy.tier
+    cut.log = [f"excerpt: {t0:.1f}-{t1:.1f} s of the task", *puppy.log]
+    return src, cut
+
+
+def _cut(track, idx, t_base, tau_base):
+    """Samples idx of a track (contiguous), its clock and labels starting at t_base and its tau at tau_base."""
+    duration = (len(idx) - 1) * DT
+
+    def moved(labels):
+        out = [Label(b.name, max(0.0, float(b.t0) - t_base), min(duration, float(b.t1) - t_base)) for b in labels]
+        return [b for b in out if b.t1 > b.t0]
+
+    return Track(
+        q=track.q[idx].copy(),
+        grip=track.grip[idx].copy(),
+        zone=track.zone[idx].copy(),
+        held=track.held[idx].copy(),
+        tau=track.tau[idx] - tau_base,
+        phases=moved(track.phases),
+        beats=moved(track.beats),
+        name=track.name,
+    )
 
 
 def fenced(c, fence, note):

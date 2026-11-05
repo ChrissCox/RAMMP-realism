@@ -48,7 +48,10 @@ def durations(plain, puppy):
 class PairClip(Clip):
     """Plain vs Puppy Mode side by side (1600x720): build() returns (plain, puppy). Both start
     together, the shorter side holds its last frame, each header ('Plain (today)', 'Puppy Mode')
-    runs its own clock, and the subtitle adds both durations."""
+    runs its own clock, and the subtitle adds both durations. headers: other labels for the two
+    sides (None: those two)."""
+
+    headers: tuple[str, str] | None = None
 
     def subtitle_for(self, tracks):
         plain, puppy = tracks
