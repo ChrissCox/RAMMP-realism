@@ -35,8 +35,9 @@ def _axis_angle(axis, angle):
 
 
 class _Joint:
-    def __init__(self, name, origin_R, origin_p, axis, vel_limit, pos_limit):
+    def __init__(self, name, origin_R, origin_p, axis, vel_limit, pos_limit, child=None):
         self.name = name
+        self.child = child  # name of the child link
         self.origin_R = origin_R
         self.origin_p = origin_p
         self.axis = axis  # None for a fixed joint
@@ -74,7 +75,7 @@ class Chain:
                     vel = float(limit.get("velocity"))
                 if kind == "revolute" and limit is not None:
                     lim = [float(limit.get("lower")), float(limit.get("upper"))]
-            joint = _Joint(el.get("name"), _rpy_to_matrix(rpy), xyz, axis, vel, lim)
+            joint = _Joint(el.get("name"), _rpy_to_matrix(rpy), xyz, axis, vel, lim, el.find("child").get("link"))
             by_child[el.find("child").get("link")] = (el.find("parent").get("link"), joint)
 
         ee_links = [n for n in by_child if n.endswith("end_effector_link")]
@@ -127,6 +128,30 @@ class Chain:
         offset = self._site_offset(site)
         p, R, _, _ = self._forward(q)
         return p + R @ offset, R
+
+    def link_pose(self, q, link_name):
+        """Position (3,) and rotation (3, 3) of a URDF link frame in the root frame. `link_name`
+        is the full link name, or a suffix of it that names exactly one link on the chain
+        (e.g. "half_arm_1_link")."""
+        q = np.asarray(q, dtype=float)
+        if q.shape != (N_JOINTS,):
+            raise ValueError(f"q must have shape ({N_JOINTS},), got {q.shape}")
+        matches = [j for j in self._path if j.child == link_name]
+        if not matches:
+            matches = [j for j in self._path if j.child and j.child.endswith(link_name)]
+        if len(matches) != 1:
+            raise ValueError(f"{link_name!r} does not name exactly one link on the chain")
+        R, p = np.eye(3), np.zeros(3)
+        k = 0
+        for joint in self._path:
+            p = p + R @ joint.origin_p
+            R = R @ joint.origin_R
+            if joint.axis is not None:
+                R = R @ _axis_angle(joint.axis, q[k])
+                k += 1
+            if joint is matches[0]:
+                return p, R
+        raise AssertionError("unreachable")
 
     def jacobian(self, q, site="ee"):
         """6x7 world-frame Jacobian of a site: linear rows first, then angular."""

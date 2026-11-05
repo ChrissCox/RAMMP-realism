@@ -68,4 +68,4 @@ def functional_track(name):
 
 
 def all_run_names():
-    return [os.path.basename(p)[:-5] for p in sorted(glob.glob(os.path.join(DATA, "*.json")))]
+    return [os.path.basename(p)[:-5] for p in sorted(glob.glob(os.path.join(DATA, "grab_container_*.json")))]

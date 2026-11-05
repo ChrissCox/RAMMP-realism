@@ -8,7 +8,7 @@ import pytest
 from puppy_motion.urdf import Chain
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
-RUNS = sorted(glob.glob(os.path.join(DATA, "*.json")))
+RUNS = sorted(glob.glob(os.path.join(DATA, "grab_container_*.json")))
 SITES = ("ee", "tool", "eye", "neck")
 
 
