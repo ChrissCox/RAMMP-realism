@@ -160,6 +160,7 @@ class Violation:
     detail: str
     row: int = -1
     part: int = -1
+    joint: int = -1
 
 
 # ---------------------------------------------------------------------------------- clearance
@@ -217,9 +218,16 @@ def away_from_user(clear, track, expr, near):
 
 
 # ------------------------------------------------------------------------------------- caps
+def fdiff(x, n=1):
+    """(N, ...) forward differences / DT**n of order n, aligned to the first sample of each stencil
+    (zero at the end). Unlike central differences they see a sample-to-sample alternation."""
+    d = np.diff(x, n=n, axis=0) / DT**n
+    return np.concatenate([d, np.zeros((n,) + x.shape[1:])])
+
+
 def gripper_rate(dgrip):
     """(N,) strokes/s of a gripper offset from each sample to the next (a step shows in full)."""
-    return np.abs(np.diff(dgrip, append=dgrip[-1])) / DT
+    return np.abs(fdiff(np.asarray(dgrip, dtype=float)))
 
 
 def expressive_head_speed(chain, track, q):
@@ -230,7 +238,7 @@ def expressive_head_speed(chain, track, q):
         offset = np.zeros((track.n, 3))
         for i in np.nonzero(changed)[0]:
             offset[i] = chain.fk(q[i], site)[0] - chain.fk(track.q[i], site)[0]
-        worst = np.maximum(worst, np.linalg.norm(np.gradient(offset, DT, axis=0), axis=1))
+        worst = np.maximum(worst, np.linalg.norm(fdiff(offset), axis=1))
     return worst
 
 
@@ -239,31 +247,36 @@ def _over(kind, ratio, unit, value, cap):
     worst = ratio.max(axis=1)
     col = ratio.argmax(axis=1)
     cap = np.broadcast_to(cap, value.shape)
+    seven = ratio.shape[1] == 7
 
     def detail(i):
-        where = f" (joint {col[i] + 1})" if ratio.shape[1] == 7 else ""
+        where = f" (joint {col[i] + 1})" if seven else ""
         return f"{value[i, col[i]]:.3f} {unit} > {cap[i, col[i]]:.3f}{where} at {i * DT:.2f} s"
 
-    return [Violation(kind, int(i), float(worst[i]), detail(i)) for i in np.nonzero(worst > 1.0 + 1e-9)[0]]
+    return [
+        Violation(kind, int(i), float(worst[i]), detail(i), joint=int(col[i]) if seven else -1)
+        for i in np.nonzero(worst > 1.0 + 1e-9)[0]
+    ]
 
 
 def cap_violations(chain, scene, track, q, grip=None, caps=DEFAULT_CAPS, clear=None):
     """Every cap the composite q (and gripper, default the task one) breaks against the task
     `track`: the expressive part's joint speed, acceleration and head speed (the `caps` preset on
     the track's zones); the composite's joint speed, ranges and guards; the expressive gripper
-    speed; and every arm part's clearance floor to the person and the obstacles."""
+    speed; and every arm part's clearance floor to the person and the obstacles. Speeds are
+    per-sample (forward) differences, so a jitter between samples counts in full."""
     clear = clear or _Clearance(chain, scene)
     limits = sample_caps(track.zone, caps)
     vel = chain.vel_limits
     expr = q - track.q
-    v_e = np.abs(np.gradient(expr, DT, axis=0))
-    a_e = np.abs(np.gradient(np.gradient(expr, DT, axis=0), DT, axis=0))
+    v_e = np.abs(fdiff(expr))
+    a_e = np.abs(fdiff(expr, 2))
     out = _over("expressive joint speed", v_e / limits.joint_speed, "rad/s", v_e, limits.joint_speed)
     out += _over("expressive joint accel", a_e / limits.joint_accel, "rad/s^2", a_e, limits.joint_accel)
     head = expressive_head_speed(chain, track, q)[:, None]
     out += _over("expressive head speed", head / limits.head_speed[:, None], "m/s", head, limits.head_speed[:, None])
-    v = np.abs(np.gradient(q, DT, axis=0))
-    room = np.maximum(vel - np.abs(np.gradient(track.q, DT, axis=0)), 1e-9)
+    v = np.abs(fdiff(q))
+    room = np.maximum(vel - np.abs(fdiff(track.q)), 1e-9)
     out += _over("composite joint speed", np.where(v > vel, v_e / room, 0.0), "rad/s", v, vel[None])
     lim = guard_limits(chain)
     room = np.maximum(lim - np.abs(track.q), 1e-9)
@@ -292,27 +305,30 @@ def _clearance_violations(clear, track, q):
 # --------------------------------------------------------------------------------- composing
 def compose(warped, parts, chain, scene, caps=DEFAULT_CAPS):
     """The Puppy Mode track: the warped task track plus `parts` (each scaled in place when it would
-    exceed a cap or a clearance floor), fitted to the CAP_PRESETS preset `caps`."""
+    exceed a cap or a clearance floor), fitted to the CAP_PRESETS preset `caps`.
+
+    The result always satisfies every cap, guard and clearance floor: a contribution that cannot
+    be fitted by scaling is switched off (scale 0), the implicated ones first, then all."""
     if caps not in CAP_PRESETS:
         raise ValueError(f"unknown caps preset {caps!r}; expected one of {sorted(CAP_PRESETS)}")
-    gain = zone_gain(warped.zone)
-    grip_gain = zone_gain(np.where(warped.held, Zone.PRECISION, warped.zone), GRIP_GAINS)
-    near = near_user_weight(warped.zone)
-    clear = _Clearance(chain, scene)
-    dq_memo = {}
+    fit = _Fit(chain, scene, warped, parts, caps)
     log = [f"{c.name}: {note}" for c in parts for note in c.notes]
-    violations = []
+    q, grip, violations = fit.realise()
     for _ in range(FIT_ROUNDS):
-        head, joints, dgrip = _summed(parts, warped.n)
-        expr = gain[:, None] * (joints + _head_to_joints(chain, warped.q, head, gain, dq_memo))
-        expr = away_from_user(clear, warped, expr, near)
-        q = np.where((gain == 0.0)[:, None], warped.q, warped.q + expr)
-        grip = np.where(grip_gain == 0.0, warped.grip, np.clip(warped.grip + grip_gain * dgrip, 0.0, 1.0))
-        violations = cap_violations(chain, scene, warped, q, grip, caps, clear)
-        if not violations or not _shrink(chain, warped, (gain, grip_gain), parts, violations, log, clear):
+        if not violations or not fit.shrink(violations, log):
             break
+        q, grip, violations = fit.realise()  # recompose after every shrink
     if violations:
         log.append(f"still over a cap after fitting: {len(violations)} samples, worst {violations[0].kind}")
+        for c in fit.implicated(violations) or parts:
+            c.scale = 0.0
+            log.append(f"{c.name}: switched off (amplitude x0.00): it cannot be fitted to the caps")
+        q, grip, violations = fit.realise()
+        if violations:  # the implicated ones were not the whole story
+            for c in parts:
+                c.scale = 0.0
+            log.append("all contributions switched off: fitting could not satisfy the caps")
+            q, grip, violations = fit.realise()
     labels = sorted([*warped.labels, *(lb for c in parts for lb in c.labels)], key=lambda lb: lb.t0)
     return ComposedTrack(
         q=q,
@@ -322,11 +338,116 @@ def compose(warped, parts, chain, scene, caps=DEFAULT_CAPS):
         tau=warped.tau.copy(),
         labels=labels,
         source=warped.source if warped.source is not None else warped,
-        gain=gain,
+        gain=fit.gain,
         func=warped,
         caps=caps,
         log=log,
     )
+
+
+class _Fit:
+    """One compose() run: the gains, the clearance memo, and the blame bookkeeping."""
+
+    def __init__(self, chain, scene, track, parts, caps):
+        self.chain, self.scene, self.track, self.parts, self.caps = chain, scene, track, parts, caps
+        self.gain = zone_gain(track.zone)
+        self.grip_gain = zone_gain(np.where(track.held, Zone.PRECISION, track.zone), GRIP_GAINS)
+        self.near = near_user_weight(track.zone)
+        self.clear = _Clearance(chain, scene)
+        self.memo = {}
+        self.realised = []
+
+    def _head_to_joints(self, head):
+        """Joint offsets realising the head offsets at each task posture (where gain > 0)."""
+        dq = np.zeros((self.track.n, 7))
+        for i in np.nonzero((self.gain > 0.0) & np.any(head != 0.0, axis=1))[0]:
+            key = (i, head[i].tobytes())
+            if key not in self.memo:
+                self.memo[key] = head_dq(self.chain, self.track.q[i], head[i])
+            dq[i] = self.memo[key]
+        return dq
+
+    def realise(self):
+        """(q, grip, violations) of the contributions at their current scales. Also records each
+        contribution's own realised joint offsets, gain * (joints + head_dq(head)), for blaming."""
+        t = self.track
+        head, joints, dgrip = _summed(self.parts, t.n)
+        self.realised = [
+            self.gain[:, None] * (c.scale * c.joints + self._head_to_joints(c.scale * c.head)) for c in self.parts
+        ]
+        expr = self.gain[:, None] * (joints + self._head_to_joints(head))
+        expr = away_from_user(self.clear, t, expr, self.near)
+        q = np.where((self.gain == 0.0)[:, None], t.q, t.q + expr)
+        grip = np.where(self.grip_gain == 0.0, t.grip, np.clip(t.grip + self.grip_gain * dgrip, 0.0, 1.0))
+        return q, grip, cap_violations(self.chain, self.scene, t, q, grip, self.caps, self.clear)
+
+    def _activity(self, k):
+        """(N,) how fast contribution k moves the arm around each sample: its realised joint
+        offsets' speed and acceleration (in rad/s), windowed, so blame follows what moves."""
+        window = int(round(CAP_WINDOW_S / DT))
+        off = self.realised[k]
+        rate = np.abs(fdiff(off)).max(axis=1)
+        accel = np.abs(fdiff(off, 2)).max(axis=1) * DT
+        return sliding_max(np.maximum(rate, accel), window)
+
+    def _grip_activity(self, k):
+        c = self.parts[k]
+        return sliding_max(gripper_rate(self.grip_gain * c.scale * c.grip), int(round(CAP_WINDOW_S / DT)))
+
+    def _clearance_effects(self, v):
+        """How much each contribution alone (its realised offset) changes the violated clearance (m)."""
+        i, held = v.index, self.track.held[v.index]
+        base = self.clear(self.track.q[i], held)[v.row, v.part]
+        return np.array([self.clear(self.track.q[i] + off[i], held)[v.row, v.part] - base for off in self.realised])
+
+    def _weights(self, v):
+        """(contributions,) how much each is behind violation v, from its own realised offset."""
+        i, parts = v.index, range(len(self.parts))
+        if v.row >= 0:  # clearance: together they may break it though neither does alone
+            return np.array([np.abs(off[i]).max() for off in self.realised])
+        if v.kind == "expressive gripper speed":
+            return np.array([self._grip_activity(k)[i] for k in parts])
+        if v.kind == "joint limit/guard":
+            return np.array([np.abs(off[i, v.joint]) for off in self.realised])
+        if v.kind == "composite joint speed":
+            return np.array([np.abs(fdiff(off)[i, v.joint]) for off in self.realised])
+        return np.array([self._activity(k)[i] for k in parts])
+
+    def blamed(self, v):
+        """Contributions behind violation v: for a clearance floor, those whose own offset lowers
+        that clearance by at least BLAME_SHARE of the worst one's; otherwise those whose realised
+        weight there (see _weights) is at least BLAME_SHARE of the biggest. A held offset has no
+        activity of its own but its realised offset still counts."""
+        if v.row >= 0:
+            effect = self._clearance_effects(v)
+            if effect.min() < 0.0:
+                return list(np.nonzero(effect <= BLAME_SHARE * effect.min())[0])
+        weight = self._weights(v)
+        if weight.max() <= 0.0 and v.kind != "expressive gripper speed":
+            weight = np.array([np.abs(off[v.index]).max() for off in self.realised])
+        return [] if weight.max() <= 0.0 else list(np.nonzero(weight >= BLAME_SHARE * weight.max())[0])
+
+    def implicated(self, violations):
+        """Contributions blamed by any of the remaining violations (worst first, bounded)."""
+        out = set()
+        for v in sorted(violations, key=lambda v: -v.ratio)[:MAX_BLAME_VISITS]:
+            out.update(self.blamed(v))
+        return [self.parts[k] for k in sorted(out)]
+
+    def shrink(self, violations, log):
+        """Scale each contribution down by its worst violation (CAP_MARGIN / ratio). Violations are
+        visited worst first, at most MAX_BLAME_VISITS of them; False when nothing could be blamed."""
+        worst = {}
+        for v in sorted(violations, key=lambda v: -v.ratio)[:MAX_BLAME_VISITS]:
+            for k in self.blamed(v):
+                worst.setdefault(k, v)
+            if len(worst) == len(self.parts):
+                break
+        for k, v in worst.items():
+            c = self.parts[k]
+            c.scale *= CAP_MARGIN / v.ratio
+            log.append(f"{c.name}: amplitude x{c.scale:.2f} ({v.kind}: {v.detail})")
+        return bool(worst)
 
 
 def _summed(parts, n):
@@ -336,77 +457,3 @@ def _summed(parts, n):
         joints += c.scale * c.joints
         grip += c.scale * c.grip
     return head, joints, grip
-
-
-def _head_to_joints(chain, q_task, head, gain, memo):
-    """Joint offsets realising the head offsets at each task posture (where gain > 0)."""
-    dq = np.zeros((len(q_task), 7))
-    for i in np.nonzero((gain > 0.0) & np.any(head != 0.0, axis=1))[0]:
-        key = (i, head[i].tobytes())
-        if key not in memo:
-            memo[key] = head_dq(chain, q_task[i], head[i])
-        dq[i] = memo[key]
-    return dq
-
-
-def _activity(c, gains, window):
-    """(N,) how fast a contribution moves the arm around each sample: the largest rate of change of
-    its offsets times their zone gains within `window` samples (head turns in rad/s, head shifts in
-    HEAD_LEVER_M per second, joints in rad/s). Speed and acceleration violations are blamed on
-    what moves."""
-    gain, grip_gain = gains
-    g = gain[:, None]
-    rate = (
-        np.maximum.reduce(
-            [
-                np.abs(np.gradient(g * c.head[:, 3:], DT, axis=0)).max(axis=1),
-                np.abs(np.gradient(g * c.head[:, :3], DT, axis=0)).max(axis=1) / HEAD_LEVER_M,
-                np.abs(np.gradient(g * c.joints, DT, axis=0)).max(axis=1),
-                np.abs(np.gradient(grip_gain * c.grip, DT)),
-            ]
-        )
-        * c.scale
-    )
-    return sliding_max(rate, window)
-
-
-def _clearance_effects(chain, track, gains, parts, v, clear):
-    """How much each contribution alone changes the violated clearance at its sample (m)."""
-    gain = gains[0]
-    i = v.index
-    base = clear(track.q[i], track.held[i])[v.row, v.part]
-    effects = []
-    for c in parts:
-        dq = gain[i] * (c.scale * c.joints[i] + head_dq(chain, track.q[i], c.scale * c.head[i]))
-        effects.append(clear(track.q[i] + dq, track.held[i])[v.row, v.part] - base)
-    return np.array(effects)
-
-
-def _blamed(chain, track, gains, parts, v, activity, clear):
-    """Contributions behind violation v: for a clearance floor, those whose own offset lowers that
-    clearance by at least BLAME_SHARE of the worst one's; otherwise (or when none does alone)
-    those moving at least BLAME_SHARE as fast there as the fastest."""
-    if v.row >= 0:
-        effect = _clearance_effects(chain, track, gains, parts, v, clear)
-        if effect.min() < 0.0:
-            return list(np.nonzero(effect <= BLAME_SHARE * effect.min())[0])
-    here = activity[:, v.index]
-    return [] if here.max() <= 0.0 else list(np.nonzero(here >= BLAME_SHARE * here.max())[0])
-
-
-def _shrink(chain, track, gains, parts, violations, log, clear):
-    """Scale each contribution down by its worst violation (CAP_MARGIN / ratio). Violations are
-    visited worst first, at most MAX_BLAME_VISITS of them; False when nothing could be blamed."""
-    window = int(round(CAP_WINDOW_S / DT))
-    activity = np.array([_activity(c, gains, window) for c in parts])
-    worst = {}
-    for v in sorted(violations, key=lambda v: -v.ratio)[:MAX_BLAME_VISITS]:
-        for k in _blamed(chain, track, gains, parts, v, activity, clear):
-            worst.setdefault(k, v)
-        if len(worst) == len(parts):
-            break
-    for k, v in worst.items():
-        c = parts[k]
-        c.scale *= CAP_MARGIN / v.ratio
-        log.append(f"{c.name}: amplitude x{c.scale:.2f} ({v.kind}: {v.detail})")
-    return bool(worst)

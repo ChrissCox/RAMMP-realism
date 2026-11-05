@@ -12,7 +12,7 @@ from puppy_motion import compose
 from puppy_motion.caps import CAP_PRESETS, URDF_GUARDS
 from puppy_motion.compose import Contribution, compose as compose_track, head_dq
 from puppy_motion.geometry import PARTS
-from puppy_motion.track import DT, Zone, constant_track, resample_track
+from puppy_motion.track import DT, Zone, constant_track, joint_move, resample_track
 
 FREE, NEAR_USER, PRECISION = Zone.FREE, Zone.NEAR_USER, Zone.PRECISION
 GAIN_STEP_MAX = np.pi / (2.0 * round(C.GAIN_RAMP_S / DT))  # steepest raised-cosine step per sample
@@ -226,3 +226,146 @@ def test_the_result_is_a_track_carrying_gain_log_and_labels(home, chain, scene):
     assert out.gain.shape == (rest.n,) and isinstance(out.log, list)
     assert [lb.name for lb in out.labels] == ["rest", "nod"]
     assert out.q.shape == rest.q.shape and np.array_equal(out.tau, rest.tau)
+
+
+# ------------------------------------------------------------------ fix round 1: regressions
+def _mj(u):
+    u = np.clip(u, 0.0, 1.0)
+    return u**3 * (10.0 - 15.0 * u + 6.0 * u**2)
+
+
+def _fwd_speed(q):
+    return np.abs(np.diff(q, axis=0)) / DT
+
+
+def test_a_held_head_tilt_over_a_moving_task_is_fitted(functional, chain, scene):
+    """An offset held while the task moves has no activity of its own, but head_dq at the moving
+    posture gives large joint rates: the fit must blame its realised joint offsets."""
+    tr = resample_track(functional, np.arange(285, 542, dtype=float))  # a FREE window with the arm moving
+    tilt = Contribution.empty("held_tilt", tr.n)
+    tilt.head[:, 3] = np.radians(12) * _mj(tr.t / 1.0)
+    tilt.head[:, 4] = np.radians(-8) * _mj(tr.t / 1.0)
+    out = compose_track(tr, [tilt], chain, scene)
+    assert tilt.scale < 1.0 and any(line.startswith("held_tilt: amplitude x") for line in out.log)
+    assert _failed(out, chain, scene) == []
+    assert (_fwd_speed(out.q) <= chain.vel_limits + 1e-9).all()  # the composite stays under the URDF limits
+    assert out.log[-1].startswith("held_tilt") or "still over" not in " ".join(out.log)
+
+
+def test_a_head_offset_held_over_the_whole_run_stays_inside_every_cap(functional, chain, scene):
+    tr = functional
+    gaze = Contribution.empty("gaze", tr.n)
+    gaze.head[:, 5] = 0.3 * _mj(tr.t / 1.0)
+    gaze.head[:, 4] = -0.15 * _mj(tr.t / 1.0)
+    out = compose_track(tr, [gaze], chain, scene)
+    assert gaze.scale < 1.0
+    assert _failed(out, chain, scene) == []
+
+
+def test_a_static_joint_offset_over_the_guard_is_fitted(home, chain, scene):
+    q = home.copy()
+    q[3] = -(URDF_GUARDS[3] - 0.05)  # 5 cm inside joint 4's guard
+    rest = constant_track(q, 0.5, 2.0)
+    c = Contribution.empty("static", rest.n)
+    c.joints[:, 3] = -0.1
+    out = compose_track(rest, [c], chain, scene)
+    assert 0.0 < c.scale < 1.0
+    assert np.abs(out.q[:, 3]).max() <= URDF_GUARDS[3] + 1e-9
+    assert _failed(out, chain, scene) == []
+
+
+def test_an_offset_held_while_the_task_drives_a_joint_toward_its_guard(home, chain, scene):
+    from puppy_motion.track import concat
+
+    q0, q1 = home.copy(), home.copy()
+    q0[3], q1[3] = -1.9, -(URDF_GUARDS[3] - 0.03)
+    task = concat([constant_track(q0, 0.5, 1.5), joint_move(q0, q1, 2.0, grip=0.5), constant_track(q1, 0.5, 1.0)])
+    c = Contribution.empty("held", task.n)
+    c.joints[:, 3] = -0.1 * _mj(task.t / 1.0)  # eased in, then held
+    out = compose_track(task, [c], chain, scene)
+    assert c.scale < 1.0
+    assert np.abs(out.q[:, 3]).max() <= URDF_GUARDS[3] + 1e-9
+    assert _failed(out, chain, scene) == []
+
+
+def test_the_composite_urdf_speed_is_checked_and_held(home, chain, scene):
+    task = joint_move(home, home + np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.55]), 0.9, grip=0.5)  # ~1.15 rad/s peak on joint 7
+    fast = task.q.copy()
+    fast[:, 6] += 0.5 * (-1.0) ** np.arange(task.n) * np.sin(np.pi * task.t / task.t[-1]) ** 2
+    kinds = {v.kind for v in compose.cap_violations(chain, scene, task, fast, task.grip)}
+    assert "composite joint speed" in kinds
+    c = Contribution.empty("push", task.n)
+    c.joints[:, 6] = 0.4 * _mj(task.t / task.t[-1])  # under its own 0.85 rad/s cap, but adds to the task's speed
+    out = compose_track(task, [c], chain, scene)
+    assert 0.0 < c.scale < 1.0 and any("composite joint speed" in line for line in out.log)
+    assert (_fwd_speed(out.q) <= chain.vel_limits + 1e-9).all()
+    assert _failed(out, chain, scene) == []
+
+
+def test_clearance_broken_by_several_contributions_together_is_fitted(home, chain, scene):
+    """Each offset alone eats 4 mm of the 5 mm the person floor allows; together they break it."""
+    base = compose.clearances_of(chain, scene, home, False)
+    floor = compose.clearance_floor(base)
+    part = int(np.argmin(base[0]))
+    grad = np.zeros(7)
+    for k in range(4):
+        step = np.zeros(7)
+        step[k] = 1e-5
+        grad[k] = (compose.clearances_of(chain, scene, home + step, False)[0, part] - base[0, part]) / 1e-5
+    assert np.linalg.norm(grad) > 0.1
+    each = -0.004 * grad / (grad @ grad)  # lowers that part's clearance by about 4 mm
+    alone = compose.clearances_of(chain, scene, home + each, False)[0]
+    both = compose.clearances_of(chain, scene, home + 2 * each, False)[0]
+    assert (alone >= floor[0]).all() and (both < floor[0]).any()
+    rest = constant_track(home, 0.5, 1.0)
+    parts = []
+    for name in "AB":
+        c = Contribution.empty(name, rest.n)
+        c.joints[:] = each
+        parts.append(c)
+    out = compose_track(rest, parts, chain, scene)
+    assert all(c.scale < 1.0 for c in parts)
+    assert _failed(out, chain, scene) == []
+    clr = np.array([compose.clearances_of(chain, scene, q, False)[0] for q in out.q])
+    assert (clr >= floor[0]).all()
+
+
+def test_a_sample_to_sample_alternation_is_seen(home, chain, scene):
+    rest = constant_track(home, 0.5, 3.0)
+    buzz = Contribution.empty("buzz", rest.n)
+    env = np.sin(np.pi * rest.t / rest.t[-1]) ** 2
+    buzz.joints[:, 6] = 0.04 * env * (-1.0) ** np.arange(rest.n)
+    raw = rest.q + buzz.joints
+    assert "expressive joint speed" in {v.kind for v in compose.cap_violations(chain, scene, rest, raw)}
+    out = compose_track(rest, [buzz], chain, scene)
+    assert buzz.scale < 0.2
+    assert _fwd_speed(out.q - rest.q).max() <= CAP_PRESETS["default"][FREE].joint_speed.max()
+    assert _failed(out, chain, scene) == []
+
+
+def test_a_contribution_that_cannot_be_fitted_ends_at_scale_zero(home, chain, scene, monkeypatch):
+    rest = constant_track(home, 0.5, 2.0)
+    bad = Contribution.empty("bad", rest.n)
+    bad.joints[:, 6] = 0.04 * (-1.0) ** np.arange(rest.n)
+    ok = Contribution.empty("ok", rest.n)
+    ok.joints[:, 0] = _wave(rest.n, 2.0, 0.01)
+    monkeypatch.setattr(compose, "FIT_ROUNDS", 0)  # no shrinking at all: only the fail-safe is left
+    out = compose_track(rest, [bad, ok], chain, scene)
+    assert bad.scale == 0.0
+    assert any("switched off" in line and line.startswith("bad") for line in out.log)
+    assert _failed(out, chain, scene) == []
+    assert np.array_equal(out.q[:, 6], rest.q[:, 6])
+
+
+def test_when_nothing_can_be_blamed_every_contribution_is_switched_off(home, chain, scene, monkeypatch):
+    rest = constant_track(home, 0.5, 2.0)
+    parts = []
+    for name in ("a", "b"):
+        c = Contribution.empty(name, rest.n)
+        c.joints[:, 6] = 0.04 * (-1.0) ** np.arange(rest.n)
+        parts.append(c)
+    monkeypatch.setattr(compose._Fit, "blamed", lambda self, v: [])
+    out = compose_track(rest, parts, chain, scene)
+    assert all(c.scale == 0.0 for c in parts)
+    assert np.array_equal(out.q, rest.q)
+    assert _failed(out, chain, scene) == []
