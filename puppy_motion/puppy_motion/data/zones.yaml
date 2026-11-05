@@ -1,0 +1,40 @@
+# (phase, message) -> zone, per capability. Read by puppy_motion.zones.zone_of.
+#
+# Anything not listed here is PRECISION (fail-safe), including a new message in a listed phase.
+# zone: FREE | NEAR_USER | PRECISION (NEAR_USER is geometric, never listed).
+# precise_end: true marks the one move that ends at a precise pose (grasp, pre-press).
+# any_message: true matches the phase whatever its message is. Use it only where the capability
+#   builds the message at run time (an f-string), so the message cannot be a table key.
+
+grab_container:
+  # Recorded runs, plus today's grasp.py.
+  - {phase: idle, message: "", zone: FREE}          # before the goal: the arm rests at home
+  - {phase: home, message: "", zone: FREE}
+  - {phase: locate, message: "", zone: PRECISION}   # the scene camera segments the container: keep out of its view
+  - {phase: view, message: "", zone: FREE}
+  - {phase: detect, message: "", zone: PRECISION}   # wrist-camera perception hold: frames must agree to 5 mm
+  - {phase: grasp, message: opening, zone: FREE}
+  - {phase: grasp, message: "view -> pre-grasp -> grasp, one motion", zone: FREE}     # recorded runs
+  - {phase: approach, message: "view -> pre-grasp -> grasp, one motion", zone: FREE, precise_end: true}  # grasp.py today
+  - {phase: grasp, message: closing, zone: PRECISION}
+  - {phase: raise, message: "", zone: PRECISION}    # lifting it clear of the counter
+  - {phase: approach, message: "dry run: planning", zone: PRECISION}  # a dry run moves nothing
+  - {phase: raise, message: "dry run: planning", zone: PRECISION}
+  - {phase: done, message: "", zone: FREE}          # holding it, goal succeeded
+  - {phase: aborted, message: "", zone: FREE}       # the arm holds where it stopped
+
+# Phases are the `name` of ctx.progress(name, fraction, message) in feature/4-button-press
+# (button_press/node.py step() and press_button.py run.step()). The node builds the message of
+# every step as f"{target}: {name}", so those phases use any_message and the key message is "".
+button_press:
+  - {phase: preflight, any_message: true, zone: PRECISION}   # checks before any motion
+  - {phase: detect, any_message: true, zone: PRECISION}      # first look at the dome panel
+  - {phase: stage, any_message: true, zone: FREE}            # transit to the staging pose
+  - {phase: redetect, any_message: true, zone: PRECISION}    # second look from the staging pose
+  - {phase: plan, any_message: true, zone: PRECISION}        # planning, arm at rest
+  - {phase: approach, any_message: true, zone: FREE, precise_end: true}  # move to the pre-press pose, at the panel
+  - {phase: press, any_message: true, zone: PRECISION}       # contact with the button
+  - {phase: return, any_message: true, zone: PRECISION}      # backs out of contact along the panel normal, then returns
+  - {phase: mock, message: "mock: nothing detected or moved", zone: PRECISION}  # mock mode moves nothing
+  - {phase: done, message: done, zone: FREE}
+  - {phase: done, message: "dry run: nothing moved", zone: FREE}

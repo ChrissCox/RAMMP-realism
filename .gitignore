@@ -7,3 +7,4 @@ spike/media/*.gif
 spike/media/*_peaks.png
 .superpowers/
 *.egg-info/
+puppy_motion/uv.lock
