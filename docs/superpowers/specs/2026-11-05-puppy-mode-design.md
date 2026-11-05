@@ -1,6 +1,7 @@
 # Puppy Mode: expressive motion for the RAMMP arm (design)
 
-Date: 2026-11-05. Status: draft, waiting for approval. Visual companion: the "RAMMP Puppy Mode" doc
+Date: 2026-11-05. Status: approved for planning; the user delegated the three open questions to the
+lead, and they are decided below. Visual companion: the "RAMMP Puppy Mode" doc
 (<https://claude.ai/artifact/Rm6oByCsLQMb7nRnFSab7q>) shows every motion as video.
 
 ## Intent
@@ -199,17 +200,48 @@ where it is". grab_container raises that refusal as recoverable.
    - `ctx.progress(...)` forwards, then reports a phase event to the director.
    - `self.arm.go_to_*` and the other move calls forward unchanged. Before and after each call the
      director may play boundary beats.
-   - Calls the zone table marks PRECISION, contact moves, impedance moves and streams get only pauses.
+   - Calls the zone table marks PRECISION, contact moves and streams get only pauses. A move's
+     control mode does not change its zone (see "Control mode" below).
    - After `execute()` returns, a success plays the success beats. A recoverable `EngineError` plays
      the failure beats, then re-raises unchanged. A `Cancelled`, `EStopped` or `ControlTaken` result,
      or any other exception, plays nothing.
    - A beat is a short joint trajectory sent with `self.arm.execute_joint_trajectory`. It starts and
      ends at the measured posture, is validated against the caps, the joint guards and the configured
      person zone, and runs after a `ctx.checkpoint()` so pause and cancel still work.
+   - On the robot, beats move the arm only. Gripper chomps stay in the simulator until the hardware
+     phase *(call)*, because they add a pinch hazard and need the gripper resource.
+   - A beat never changes a task's result:
+     - Beats after the task stop at their first exception. The task's own result is reported either
+       way: its payload, or the original `EngineError`.
+     - Between moves, a `Cancelled`, `EStopped` or `ControlTaken` from a beat propagates as it would
+       from the capability's next call.
+     - Any other refusal from the driver turns beats off for the rest of the action, and the task
+       goes on.
 3. **Idle engine** (later). A `puppy_idle` capability plays at-rest behaviors when nothing else runs.
    It needs the orchestrator to preempt it instantly for a real task.
 4. **In-motion tier** (later). Plan with `plan_to_*`, add offsets in FREE parts, validate, and execute
    with `execute_joint_trajectory`.
+
+### Control mode *(call)*
+
+The driver runs a move in POSITION mode (stiff) or joint IMPEDANCE mode (compliant, with a gain
+profile: `default`, `soft`, `medium`, `stiff` or custom `kq`/`zeta`/`torque_limit`).
+grab_container, for example, runs every move in impedance when its goal sets `impedance: true`.
+
+- **A beat copies the task.** It is sent with the same `control_mode` and `gains` as the task's most
+  recent move call; the proxies see both on that call. The arm therefore never switches controllers
+  in the middle of a task, which could cause a jump or a settle.
+- **Near the person, always impedance.** In NEAR_USER a beat uses IMPEDANCE with the task's gains,
+  or the `default` profile if the task is in POSITION mode. A compliant arm yields if it is bumped.
+- **No task move is changed.** The task's own move calls keep whatever mode they asked for.
+- **Under impedance, small beats shrink.** The arm tracks less exactly, so a sway of a few
+  millimetres or a 2.5 cm lean comes out smaller than commanded. The simulator models the driver's
+  joint impedance law (`spike/puppy_sim/dynamics.py`) to measure how much, and the beat amplitudes
+  are tuned against that model, not against perfect tracking.
+- **The timing-only guarantee is about commands.** In impedance mode the achieved path already differs
+  slightly from the commanded one for the task itself. Puppy Mode must not add to that inside
+  PRECISION: the simulator checks that the achieved path there is the same with and without Puppy
+  Mode, so the controller state a beat leaves behind cannot leak into a precise move.
 
 Config is declared in the capability fragments (`tier: experimental`): `puppy.enabled`,
 `puppy.preset`, `puppy.person_zone` (a shape in `arm_mount`), and the zone tables, kept in the add-on
@@ -238,22 +270,31 @@ instead of keeping the spike code as is.
 Other capabilities get tables later. Each table must be checked against the capability's current
 progress strings; a string the table does not know falls back to PRECISION.
 
-## Questions for the user (they change what gets built)
+## Decided questions *(the user delegated these to the lead)*
 
-1. **Scope of the build phase.** Should it cover only the `puppy_motion` library and the simulator,
-   or also the engine hook, tested against the fake driver? The hook moves nothing, but it is a ROS 2
-   package with its own tests. If the hook is built, where does it live: in this repo as a separate
-   package (lead's suggestion, with no upstream PR before the December demos), or on a branch of
-   `rammp-org/rammp-kitchen-capability-engines`?
-2. **Where the lock-on happens on the robot.** One option is a still stare at the view pose before the
-   approach call, which needs no capability change (lead's suggestion). The other is a stop at the
-   pre-grasp standoff with a slower final approach. That reads more like a puppy sniffing the treat
-   up close, but grab_container would have to split its blended approach call.
-3. **How strict "never toward the person" is.** Today's rule: no arm link comes closer to the person
-   than min(the task's own distance, 35 cm) − 5 mm. A glance toward the person may therefore bring the
-   head a few centimetres closer when everything is more than 35 cm away (lead's suggestion). The
-   stricter option is "never closer than the task itself", which makes look-at-the-person beats from
-   the folded home pose much smaller.
+1. **Scope of the build phase.**
+   - It covers the `puppy_motion` library, the simulator (rebuilt on that library), and the engine
+     hook.
+   - The hook is tested against `capability_engine`'s fake driver, so nothing moves.
+   - It lives in this repo as its own ROS 2 package (`puppy_mode_ros`). It hooks `capability_engine`
+     at a pinned version, and the patch to `capability_engine` is kept as small as it would be in an
+     upstream PR.
+   - There is no PR to `rammp-org` before the December demos.
+   - Why: the hook is where most of the real risk lives (proxies, cancel, e-stop, control mode), and
+     the fake driver lets it be proven without hardware or touching the demo code.
+2. **Lock-on placement on the robot.**
+   - The first robot version stares at the view pose, before the approach call. That needs no change
+     to grab_container and adds about 0.9 s.
+   - The 10 cm stop-and-creep stays an opt-in option for the simulator, plus a later per-capability
+     opt-in (the capability would have to split its approach call).
+   - Why: it keeps the anti-goal "no change to a precise motion's own command" absolute.
+3. **The person rule.**
+   - Keep today's rule: no arm link comes closer to the person than min(the task's own distance,
+     35 cm) − 5 mm.
+   - Near the person (NEAR_USER), motion toward them is removed and the gain is 0.35.
+   - Why: a glance toward the person is most of the charm. The rule never lets any link inside
+     35 cm unless the task itself goes there, and impedance is used near the person (see "Control
+     mode").
 
 ## Left to the builder
 
