@@ -19,8 +19,13 @@ twice (hook.run runs once per goal).
 """
 
 import functools
+import math
 
+from capability_engine.driver_state import ControlTaken, EStopped
+from capability_engine.engine import Cancelled, EngineError
 from rclpy.exceptions import ParameterNotDeclaredException
+
+PASS = (Cancelled, EStopped, ControlTaken)
 
 PARAM_DEFAULTS = {
     "puppy.enabled": False,
@@ -37,9 +42,126 @@ def declare_params(engine):
             engine.declare_parameter(name, default)
 
 
+GRIPPER_OPEN_MAX = 0.05  # /gripper_state position (0 open .. 1 closed) above this: something is held
+
+
+def held_source(engine):
+    """A zero-argument callable: whether the container rides in the gripper. Fail-safe: True when
+    the gripper state is missing, stale (the arm interface raises), not present or NaN."""
+
+    def held():
+        try:
+            grip = engine.arm.gripper_state()
+            position = float(grip.position)
+            if not getattr(grip, "present", True) or not math.isfinite(position):
+                return True
+            return position > GRIPPER_OPEN_MAX
+        except PASS:
+            raise
+        except Exception:  # noqa: BLE001  (no reading is a held container: muted beats)
+            return True
+
+    return held
+
+
+def _param(engine, name):
+    return engine.get_parameter(name).value
+
+
+def _scene(text):
+    """The person zone: "flatbot" is the chair scene, anything else the Scene.from_param JSON."""
+    if text == "flatbot":
+        from puppy_motion.flatbot import chair_scene
+
+        return chair_scene()
+    from puppy_motion.geometry import Scene
+
+    return Scene.from_param(text)
+
+
+def _capability(engine, rules):
+    """The key of `rules` for this engine: its id, else the root module of its class."""
+    name = engine.get_name()
+    if name in rules:
+        return name
+    root = type(engine).__module__.split(".")[0]
+    return root if root in rules else None
+
+
+def _setup(engine, log):
+    """(capability, director, chain, scene) for this goal, or None (logged) to run without Puppy
+    Mode. Cancelled, EStopped and ControlTaken propagate."""
+    from puppy_motion.behaviors import Targets
+    from puppy_motion.director import Director, load_rules
+    from puppy_motion.urdf import Chain
+
+    try:
+        text = _param(engine, "puppy.person_zone")
+        if not isinstance(text, str) or not text.strip():
+            log("puppy mode off: no person zone")
+            return None
+        capability = _capability(engine, load_rules())
+        if capability is None:
+            log(f"puppy mode off: {engine.get_name()!r} has no rules")
+            return None
+        try:
+            scene = _scene(text.strip())
+        except ValueError as error:
+            log(f"puppy mode off: {error}")
+            return None
+        chain = Chain.from_urdf(engine.arm.robot_description())
+        director = Director(
+            capability,
+            chain,
+            scene,
+            Targets.from_scene(scene),
+            preset=_param(engine, "puppy.preset"),
+            lock_on=_param(engine, "puppy.lock_on"),
+        )
+    except PASS:
+        raise
+    except Exception as error:  # noqa: BLE001  (bad preset, no URDF, ...: the task runs as it was)
+        log(f"puppy mode off: {type(error).__name__}: {error}")
+        return None
+    return capability, director, chain, scene
+
+
 def run(engine, action_id, params, ctx, original):
-    """Puppy Mode on, for one goal. Task 13 fills this in; for now it is the original action."""
-    return original(engine, action_id, params, ctx)
+    """Puppy Mode on, for one goal: the original execute, with reactions at its boundaries.
+
+    TaskRequested beats play before `original`; the Succeeded beats after it returns; a recoverable
+    EngineError plays the Failed(True) beats and is re-raised (the same object). Anything else
+    propagates with no beats. During `original`, engine.arm is a PuppyArm and ctx a PuppyCtx; both
+    are restored in a finally. The task's payload is never touched."""
+    log = engine.get_logger().info
+    try:
+        from puppy_mode_ros.player import Player
+        from puppy_mode_ros.proxies import PuppyArm, PuppyCtx
+        from puppy_motion.director import Failed, Succeeded, TaskRequested
+    except ImportError as error:  # puppy_motion or the arm library is not installed
+        log(f"puppy mode off: {error}")
+        return original(engine, action_id, params, ctx)
+    setup = _setup(engine, log)
+    if setup is None:
+        return original(engine, action_id, params, ctx)
+    capability, director, chain, scene = setup
+    real_arm = engine.arm
+    player = Player(
+        real_arm, ctx, director, chain, scene, capability=capability, held=held_source(engine), log=log
+    )
+    player.emit(TaskRequested())
+    engine.arm = PuppyArm(real_arm, player)
+    try:
+        payload = original(engine, action_id, params, PuppyCtx(ctx, player.emit))
+    except EngineError as error:
+        engine.arm = real_arm
+        if error.recoverable:
+            player.emit(Failed(True))
+        raise error
+    finally:
+        engine.arm = real_arm
+    player.emit(Succeeded())
+    return payload
 
 
 def _enabled(engine):

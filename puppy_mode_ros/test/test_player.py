@@ -303,6 +303,42 @@ def test_no_beats_while_streaming(env):
     assert len(goals(env)) == 1
 
 
+def test_any_exception_out_of_a_stream_block_disables(env):
+    player, puppy = env.build()
+    with pytest.raises(KeyError):
+        with puppy.stream("joint_position"):
+            raise KeyError("the task's own bug")
+    assert player.disabled and not player.streaming
+    time.sleep(SETTLE_S)
+    player.play([make_beat()])
+    assert not goals(env)
+
+
+def test_a_warm_up_timeout_disables_the_player_for_the_action(env):
+    class NoServer(Arm):
+        def _wait_for_server(self, client, ctx, timeout_s):
+            return False
+
+    player, _ = env.build(real_arm=NoServer(env.arm, lambda js: js))
+    player.play([make_beat()])
+    assert player.disabled and not goals(env)
+    assert any("action server" in line for line in env.logs)
+
+
+def test_check_beat_uses_the_directors_caps_preset(env, monkeypatch):
+    from puppy_mode_ros import player as player_module
+
+    seen = []
+    real = player_module.check_beat
+    monkeypatch.setattr(player_module, "check_beat", lambda *a, **k: seen.append(k.get("caps")) or real(*a, **k))
+    director = StubDirector()
+    director.caps = "default"
+    player, _ = env.build(director=director)
+    player.play([make_beat()])
+    assert seen == ["default"]
+    assert Player(env.arm, env.ctx, director, env.chain, env.scene, caps="other").caps == "other"
+
+
 @pytest.mark.parametrize("code, outcome", [(-4, "disabled"), (-5, "disabled"), (-7, "disabled")])
 def test_a_driver_error_ends_beats_but_not_the_task(env, code, outcome):
     player, _ = env.build()

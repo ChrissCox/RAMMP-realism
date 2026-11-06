@@ -30,7 +30,8 @@ goal also set `disabled`: no more beats this action, the task goes on. A goal th
 PREEMPTED raises ControlTaken; HALTED raises EStopped when /control_status says e-stopped, else
 ControlTaken.
 
-Not here (Task 13 wires them): the caps preset passed to check_beat.
+check_beat runs under the caps preset of the director (its `caps` attribute, else the default), so
+the beats the director composes and the check they face never disagree.
 """
 
 import logging
@@ -43,6 +44,7 @@ from capability_engine.engine import Cancelled
 from rammp_arm import ERRORS
 
 from puppy_motion.beat import zone_at
+from puppy_motion.caps import DEFAULT_CAPS
 from puppy_motion.director import AfterMove, BeforeMove, Phase
 from puppy_motion.joints import align_turns, shortest_delta
 from puppy_motion.track import Zone
@@ -64,15 +66,16 @@ logger = logging.getLogger("puppy_mode_ros")
 
 
 class Player:
-    def __init__(self, arm, ctx, director, chain, scene, *, capability=None, held=False, log=None):
+    def __init__(self, arm, ctx, director, chain, scene, *, capability=None, held=False, log=None, caps=None):
         """`arm`: the REAL arm (never a PuppyArm); `ctx`: the real ctx; `director`: anything with
         on_event(event, q_now, held) -> [Beat]. `held`: whether the container rides in the gripper,
         a bool or a zero-argument callable. `capability`: for the zone table; the director's own
-        when not given."""
+        when not given. `caps`: the caps preset check_beat uses; the director's own when not given."""
         self.arm, self.ctx, self.director = arm, ctx, director
         self.chain, self.scene = chain, scene
         self.capability = capability if capability is not None else getattr(director, "capability", "")
         self.held = held
+        self.caps = caps if caps is not None else getattr(director, "caps", DEFAULT_CAPS)
         self.log = log or logger.info
         self.disabled = False
         self.control_mode = None  # the task's last move call's control_mode (None: none yet)
@@ -211,16 +214,21 @@ class Player:
 
     def _warm(self):
         """Make the trajectory action client and wait for its server, so the first send does not
-        wait on discovery. Best effort."""
+        wait on discovery. If the server does not come up in WARM_WAIT_S the player is disabled for
+        this action: the send's own wait for it is up to 10 s, with the arm in the task's hands."""
         if self._warmed:
-            return
+            return True
         self._warmed = True
         try:
-            self.arm._wait_for_server(self.arm._action("execute_joint_trajectory"), self.ctx, WARM_WAIT_S)
+            up = self.arm._wait_for_server(self.arm._action("execute_joint_trajectory"), self.ctx, WARM_WAIT_S)
         except PASS:
             raise
-        except Exception:  # noqa: BLE001  (a stub arm, or no server yet: the send itself reports it)
-            pass
+        except (AttributeError, TypeError):  # a stub arm without the warm-up API: the send reports
+            return True
+        if not up:
+            self._disable(f"no trajectory action server in {WARM_WAIT_S:g} s")
+            return False
+        return True
 
     # -- playing -------------------------------------------------------------------------------
 
@@ -244,7 +252,8 @@ class Player:
 
     def _play_beat(self, beat):
         held = self._held()
-        self._warm()
+        if not self._warm():
+            return None
         read = self._read()
         if read is None:
             return None
@@ -264,7 +273,7 @@ class Player:
         points = [(t, np.asarray(p, dtype=float) + offset, dq) for t, p, dq in points]
         points[0] = (points[0][0], q.copy(), points[0][2])
         zone = zone_at(self.chain, self.scene, q, held, beat.zone)  # the stricter of the two
-        found = check_beat(points, q, self.chain, self.scene, zone, held=held)
+        found = check_beat(points, q, self.chain, self.scene, zone, caps=self.caps, held=held)
         if found:
             self.log(f"puppy: skip {beat.name}: " + "; ".join(f"{v.rule}: {v.detail}" for v in found))
             return False

@@ -254,8 +254,10 @@ def test_box_opening_rows_and_zones():
         ("TaskRequested", "eager", 5, None), ("Succeeded", "proud", 6, None), ("Succeeded", "attentive", 1, None),
         ("Failed", "sorry", 6, True), ("Failed", "shake_off", 4, True),
     ]
-    for phase in ("locate", "look", "press", "grip", "carry", "release", "home"):
+    for phase in ("locate", "look", "press", "grip", "carry", "release"):
         assert zone_of("box_opening", phase, "anything").zone is Zone.PRECISION
+    assert zone_of("box_opening", "home", "anything").zone is Zone.FREE
+    assert zone_of("box_opening", "renamed", "anything").zone is Zone.PRECISION
 
 
 def test_box_opening_yields_only_boundary_beats(chain, scene, targets, home):

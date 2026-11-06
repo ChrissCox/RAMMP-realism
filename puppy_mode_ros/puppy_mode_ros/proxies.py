@@ -22,7 +22,7 @@ import inspect
 import numpy as np
 
 from capability_engine.arm import GAIN_KEYS, IMPEDANCE, POSITION
-from capability_engine.driver_state import ArmError, EStopped
+from capability_engine.driver_state import EStopped
 
 from puppy_motion.director import AfterMove, BeforeMove, Phase  # noqa: F401  (BeforeMove: see Player)
 
@@ -124,7 +124,8 @@ class PuppyArm:
         try:
             with self._arm.stream(*args, **kwargs) as stream:
                 yield stream
-        except ArmError as e:  # the stream failed or was closed on us: no beats after it
+        except BaseException as e:  # any exit but a normal one (the stream failed, or the task's code
+            # raised inside the block): no beats after it
             self._player.fail_move(f"stream: {type(e).__name__}: {e}")
             raise
         finally:
