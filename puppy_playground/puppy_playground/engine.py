@@ -256,7 +256,7 @@ class PuppyPlayground(CapabilityEngine):
         carries {"action", "error_code", "message"} so the page can show the rule that broke."""
         self._failure = None
         out = super()._on_execute(goal_handle)
-        result = out.result.result
+        result = out.result
         if result.status == result.STATUS_FAILED:
             action = goal_handle.request.action_id
             failure = self._failure
