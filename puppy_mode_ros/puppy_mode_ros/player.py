@@ -219,6 +219,8 @@ class Player:
         if self._warmed:
             return True
         self._warmed = True
+        if getattr(self.arm, "_mock", False) is True:  # mock mode makes no ROS entity: nothing to wait for
+            return True
         try:
             up = self.arm._wait_for_server(self.arm._action("execute_joint_trajectory"), self.ctx, WARM_WAIT_S)
         except PASS:

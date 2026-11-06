@@ -24,8 +24,9 @@ RUN bash -c '. /opt/ros/humble/setup.bash && . /ros2_ws/install/setup.bash && . 
     && python3 -W ignore -c "import numpy, puppy_motion.director, puppy_mode_ros.hook, puppy_mode_ros.player, \
 puppy_mode_ros.proxies, puppy_mode_ros.launch, box_opening.node; \
 assert numpy.__version__ == \"1.26.4\", numpy.__version__; print(\"imports ok\", numpy.__version__)" \
-    && python3 -m pip show puppy-motion | grep -q "^Name: puppy-motion" \
-    && python3 -m pip show puppy-mode-ros | grep -q "^Name: puppy-mode-ros"'
+    && python3 -m pip show puppy-motion > /tmp/show.txt && grep -q "^Name: puppy-motion" /tmp/show.txt \
+    && python3 -m pip show puppy-mode-ros > /tmp/show.txt && grep -q "^Name: puppy-mode-ros" /tmp/show.txt \
+    && rm /tmp/show.txt'
 
 # Run box_opening with the hook (BRINGUP.md has the whole command):
 #   python3 -m puppy_mode_ros.launch box_opening.node:Capability box_opening.node:main --ros-args ...

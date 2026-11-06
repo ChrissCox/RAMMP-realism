@@ -325,6 +325,17 @@ def test_a_warm_up_timeout_disables_the_player_for_the_action(env):
     assert any("action server" in line for line in env.logs)
 
 
+def test_a_mock_arm_has_no_server_to_wait_for(env):
+    class MockArm(Arm):
+        _mock = True
+
+        def _wait_for_server(self, client, ctx, timeout_s):
+            return False
+
+    player, _ = env.build(real_arm=MockArm(env.arm, lambda js: js))
+    assert player._warm() and not player.disabled
+
+
 def test_check_beat_uses_the_directors_caps_preset(env, monkeypatch):
     from puppy_mode_ros import player as player_module
 
