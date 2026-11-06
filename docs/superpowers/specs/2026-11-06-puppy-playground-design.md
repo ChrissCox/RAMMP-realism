@@ -255,6 +255,8 @@ the arm isn't doing anything, and stops when it is turned off or a task starts.
 
 ### The web page
 
+The page is temporary and for testing only (user decision): minimal, unstyled, never a product UI.
+
 - one button per expression;
 - a combo builder: tap to queue, then Play;
 - a size slider, starting at 0.25;

@@ -385,6 +385,10 @@ def test_no_gripper_goal_is_ever_sent(): ...
 
 ### Task 7: Web page, UI node and auto supervisor
 
+The page is a temporary testing tool (user decision). Keep it minimal: plain unstyled buttons, one
+HTML file, no build step, no design polish, and no work toward making it a product UI. The supervisor
+and the HTTP endpoints still get full tests, because they decide when the arm moves.
+
 **Files:**
 - Create: `puppy_playground/puppy_playground/ui_node.py`, `supervisor.py` and `web/index.html`
   (plain HTML, CSS and JavaScript, no build step).
