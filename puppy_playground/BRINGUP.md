@@ -115,7 +115,7 @@ On your PC, copy the candidate from snorlax (the data dir is `~/puppy-data`) and
 file:
 
 ```
-scp snorlax@10.5.15.154:puppy-data/stage_path.candidate.json C:/Users/CHC785/orca/projects/RAMMP-realism/spike/media/stage_path.candidate.json
+scp snorlax@10.5.127.121:puppy-data/stage_path.candidate.json C:/Users/CHC785/orca/projects/RAMMP-realism/spike/media/stage_path.candidate.json
 cd C:/Users/CHC785/orca/projects/RAMMP-realism/spike
 PLAYGROUND_CANDIDATE=media/stage_path.candidate.json .venv/Scripts/python -m puppy_sim render playground_stage
 ```
