@@ -22,7 +22,7 @@ retime_path only ever slows a path down, uniformly, until it meets the FREE caps
 import numpy as np
 
 from .caps import CAP_PRESETS, DEFAULT_CAPS, guard_limits
-from .geometry import PARTS, clearances
+from .geometry import PARTS, clearances, clearances_batch
 from .track import DT, Zone, _min_jerk
 from .validate import Violation
 
@@ -250,7 +250,7 @@ def _path_violations(points, chain, scene, caps):
     add("path_caps", _worst(np.maximum(lo - q, q - hi), "joint range, joint"))
     add("path_caps", _worst(np.abs(q) - guard_limits(chain) - CAP_TOL, "joint guard, joint"))
 
-    c = np.array([clearances(chain, scene, qi, False) for qi in q])  # (n, 2, 4)
+    c = clearances_batch(chain, scene, q, False)  # (n, 2, 4)
     if np.isnan(c).any():
         out.append(Violation("path_person_floor", int(np.argwhere(np.isnan(c))[0][0]), "NaN clearance"))
         return out

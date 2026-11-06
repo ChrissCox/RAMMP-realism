@@ -29,7 +29,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .caps import CAP_PRESETS, DEFAULT_CAPS, URDF_GUARDS
-from .geometry import clearances
+from .geometry import clearances, clearances_batch
 from .track import DT, Zone
 
 REST_TOL = 1e-9  # first/last point equal q_start, and are at rest, within this (rad, rad/s)
@@ -169,12 +169,13 @@ def _check(points, q_start, chain, scene, zone, caps, task_clearance, held):
     floor = np.empty((2, 4))
     floor[0] = np.minimum(task[0], NEAR_USER_M) - PERSON_SLACK_M
     floor[1] = np.minimum(task[1], OBSTACLE_KEEP_M) - OBSTACLE_TOL_M
-    seen = {}
+    keys = [qi.tobytes() for qi in q]
+    first = {}  # each distinct posture once, batched
+    for key, qi in zip(keys, q):
+        first.setdefault(key, qi)
+    seen = dict(zip(first, clearances_batch(chain, scene, np.array(list(first.values())), held)))
     short = np.zeros((n, 2, 4))
-    for i, qi in enumerate(q):
-        key = qi.tobytes()
-        if key not in seen:
-            seen[key] = clearances(chain, scene, qi, held)
+    for i, key in enumerate(keys):
         short[i] = floor - seen[key]
     short = np.where(np.isnan(short), np.inf, short)
     if not no_person:

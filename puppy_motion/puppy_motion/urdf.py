@@ -28,9 +28,13 @@ def _rpy_to_matrix(rpy):
     ])
 
 
+def _skew(axis):
+    return np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+
+
 def _axis_angle(axis, angle):
     """Rodrigues rotation about a unit axis."""
-    K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+    K = _skew(axis)
     return np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
 
 
@@ -152,6 +156,47 @@ class Chain:
             if joint is matches[0]:
                 return p, R
         raise AssertionError("unreachable")
+
+    def _resolve_link(self, link_name):
+        """Index into the path of the joint whose child is `link_name` (link_pose's matching rule)."""
+        matches = [i for i, j in enumerate(self._path) if j.child == link_name]
+        if not matches:
+            matches = [i for i, j in enumerate(self._path) if j.child and j.child.endswith(link_name)]
+        if len(matches) != 1:
+            raise ValueError(f"{link_name!r} does not name exactly one link on the chain")
+        return matches[0]
+
+    def points_batch(self, Q, links=(), sites=()):
+        """One forward-kinematics sweep over B postures Q (B, 7): the positions (B, 3) of each link
+        frame in `links` (as link_pose names them) and of each site in `sites` (as fk names them),
+        plus the end-effector rotations (B, 3, 3). Returns (link_points, site_points, R_ee) with
+        the points stacked as (len, B, 3); equal to link_pose / fk row by row."""
+        Q = np.asarray(Q, dtype=float)
+        if Q.ndim != 2 or Q.shape[1] != N_JOINTS:
+            raise ValueError(f"Q must have shape (B, {N_JOINTS}), got {Q.shape}")
+        want = {}
+        for i, name in enumerate(links):
+            want.setdefault(self._resolve_link(name), []).append(i)
+        offsets = [self._site_offset(s) for s in sites]
+        last = max(want, default=-1) if not sites else len(self._path) - 1
+        n = len(Q)
+        cos, sin = np.cos(Q), np.sin(Q)
+        R, p = np.broadcast_to(np.eye(3), (n, 3, 3)), np.zeros((n, 3))
+        link_pts = np.empty((len(links), n, 3))
+        k = 0
+        for idx, joint in enumerate(self._path[: last + 1]):
+            p = p + R @ joint.origin_p
+            R = R @ joint.origin_R
+            if joint.axis is not None:
+                K = _skew(joint.axis)
+                R = R @ (np.eye(3) + sin[:, k, None, None] * K + (1 - cos[:, k])[:, None, None] * (K @ K))
+                k += 1
+            for i in want.get(idx, ()):
+                link_pts[i] = p
+        site_pts = np.empty((len(sites), n, 3))
+        for i, off in enumerate(offsets):
+            site_pts[i] = p + R @ off
+        return link_pts, site_pts, R
 
     def jacobian(self, q, site="ee"):
         """6x7 world-frame Jacobian of a site: linear rows first, then angular."""

@@ -23,7 +23,7 @@ from .caps import (
     CAP_PRESETS, DEFAULT_CAPS, GAIN_RAMP_S, GRIP_GAINS, guard_limits, near_user_weight, sample_caps,
     sliding_max, zone_gain,
 )
-from .geometry import PARTS, clearances
+from .geometry import PARTS, clearances, clearances_batch
 from .track import DT, Label, Track, Zone
 from .urdf import SITE_OFFSETS
 
@@ -171,27 +171,71 @@ def clearances_of(chain, scene, q, held):
 
 class _Clearance:
     """geometry.clearances with a memo keyed by posture, so a fitting round only pays for the
-    postures that changed."""
+    postures that changed. prefetch() and prefetch_gradients() fill the memos for many postures in
+    one batched call; the numbers are the ones the single-posture calls give."""
 
     def __init__(self, chain, scene):
-        self.chain, self.scene, self._memo = chain, scene, {}
+        self.chain, self.scene, self._memo, self._grads = chain, scene, {}, {}
+
+    @staticmethod
+    def _key(q, held):
+        return (np.asarray(q, dtype=float).tobytes(), bool(held))
 
     def __call__(self, q, held):
-        key = (np.asarray(q, dtype=float).tobytes(), bool(held))
+        key = self._key(q, held)
         if key not in self._memo:
             self._memo[key] = clearances_of(self.chain, self.scene, q, held)
         return self._memo[key]
 
-    def gradients(self, q, held):
-        """(4, 7) d(person clearance)/dq per arm part by forward differences; zero beyond the cutoff."""
-        base = self(q, held)[0]
-        out = np.zeros((len(PARTS), 7))
-        for k in range(7):
-            step = np.zeros(7)
-            step[k] = GRADIENT_STEP
-            out[:, k] = (clearances_of(self.chain, self.scene, q + step, held)[0] - base) / GRADIENT_STEP
+    def _fill(self, qs, helds):
+        """Compute the clearances of every (q, held) not yet in the memo, together."""
+        todo = {}
+        for q, held in zip(qs, helds):
+            key = self._key(q, held)
+            if key not in self._memo:
+                todo[key] = (np.asarray(q, dtype=float), bool(held))
+        for held in (False, True):
+            keys = [k for k, (_, h) in todo.items() if h == held]
+            if keys:
+                out = clearances_batch(self.chain, self.scene, np.array([todo[k][0] for k in keys]), held)
+                self._memo.update(zip(keys, out))
+
+    def prefetch(self, qs, helds):
+        """Memoize the clearances of postures qs (n, 7) with held flags helds (n,)."""
+        self._fill(qs, helds)
+
+    def prefetch_gradients(self, qs, helds):
+        """Memoize gradients() of postures qs (n, 7), with the clearances of all their steps in one batch."""
+        todo = {}
+        for q, held in zip(qs, helds):
+            key = self._key(q, held)
+            if key not in self._grads:
+                todo[key] = (np.asarray(q, dtype=float), bool(held))
+        for held in (False, True):
+            keys = [k for k, (_, h) in todo.items() if h == held]
+            if not keys:
+                continue
+            q = np.array([todo[k][0] for k in keys])
+            stepped = (q[:, None, :] + GRADIENT_STEP * np.eye(7)).reshape(-1, 7)  # q + step_k, k = 0..6
+            both = clearances_batch(self.chain, self.scene, np.concatenate([q, stepped]), held)
+            base, rows = both[: len(q)], both[len(q):, 0, :].reshape(len(q), 7, len(PARTS))
+            for n, key in enumerate(keys):
+                self._memo[key] = base[n]
+                self._grads[key] = self._gradient(base[n, 0], rows[n].T)
+
+    @staticmethod
+    def _gradient(base, stepped):
+        """(4, 7) from the base person clearances (4,) and the stepped ones (4, 7)."""
+        out = (stepped - base[:, None]) / GRADIENT_STEP
         out[~(base < CLEARANCE_CUTOFF_M)] = 0.0
         return out
+
+    def gradients(self, q, held):
+        """(4, 7) d(person clearance)/dq per arm part by forward differences; zero beyond the cutoff."""
+        key = self._key(q, held)
+        if key not in self._grads:
+            self.prefetch_gradients(np.asarray(q, dtype=float)[None], [held])
+        return self._grads[key]
 
 
 def clearance_floor(task_clear):
@@ -207,7 +251,9 @@ def away_from_user(clear, track, expr, near):
     """Near the user, remove from each sample's offset every component that would bring an arm
     part closer to the person (first order, at the task posture), weighted by `near`."""
     expr = expr.copy()
-    for i in np.nonzero((near > 0.0) & np.any(expr != 0.0, axis=1))[0]:
+    todo = np.nonzero((near > 0.0) & np.any(expr != 0.0, axis=1))[0]
+    clear.prefetch_gradients(track.q[todo], track.held[todo])
+    for i in todo:
         grads = clear.gradients(track.q[i], track.held[i])
         for _ in range(PROJECTION_SWEEPS):
             for g in grads:
@@ -291,7 +337,9 @@ def _clearance_violations(clear, track, q):
     """A part below its floor: ratio = how much it lost / how much it was allowed to lose. The
     capsule model has no gripper, so only the arm's posture matters."""
     out = []
-    for i in np.nonzero(np.any(q != track.q, axis=1))[0]:
+    changed = np.nonzero(np.any(q != track.q, axis=1))[0]
+    clear.prefetch(np.concatenate([track.q[changed], q[changed]]), np.concatenate([track.held[changed]] * 2))
+    for i in changed:
         base, comp = clear(track.q[i], track.held[i]), clear(q[i], track.held[i])
         floor = clearance_floor(base)
         for row, j in zip(*np.nonzero(comp < floor)):
