@@ -321,6 +321,9 @@ class Director:
             self.log.append(f"{name}(False): nothing")
             return []
         floor = Zone.FREE
+        if isinstance(event, Failed) and self._entry is not None and self._entry.zone is Zone.PRECISION:
+            self.log.append(f"{name}(True): nothing (phase {self._phase!r} is PRECISION: the arm may be at a contact)")
+            return []
         if isinstance(event, (BeforeMove, AfterMove)):
             if self._entry is not None and self._entry.zone is Zone.PRECISION:
                 self.log.append(f"{name}: nothing (phase {self._phase!r} is PRECISION)")

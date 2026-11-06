@@ -179,6 +179,16 @@ def test_a_returned_beat_is_a_copy_of_the_cached_one(chain, scene, targets, home
     assert np.array_equal(b.points[0][1], home)
 
 
+def test_recoverable_failure_in_a_precision_phase_gets_nothing(chain, scene, targets, home):
+    for cap, phase in (("grab_container", "detect"), ("button_press", "press"), ("box_opening", "grip")):
+        d = make(chain, scene, targets, cap)
+        d.on_event(Phase(phase, "x"), home, False)
+        assert d.on_event(Failed(True), home, False) == [] and "PRECISION" in d.log[-1]
+    d = make(chain, scene, targets)
+    d.on_event(Phase("aborted", ""), home, False)  # FREE: the arm holds where it stopped
+    assert {b.name for b in d.on_event(Failed(True), home, False)} >= {"sorry"}
+
+
 def test_precision_phase_and_moves_inside_it_get_nothing(chain, scene, targets, home):
     d = make(chain, scene, targets)
     assert d.on_event(Phase("detect", ""), home, False) == []
