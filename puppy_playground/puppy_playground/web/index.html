@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Puppy playground (testing)</title></head>
+<body>
+<h3>Puppy playground (temporary testing page)</h3>
+<p><b>The hardware e-stop is the safety; Stop only cancels the current motion.</b></p>
+<button id="stop" style="font-size:2em;padding:0.5em 1.5em">Stop</button>
+<p id="status">...</p>
+<p>Size <input id="size" type="range" min="0.25" max="1" step="0.05" value="0.25"> <span id="sizev">0.25</span></p>
+<p><button id="stage">Stage</button> <button id="rest">Rest</button> <button id="recover">Recover</button>
+<label><input id="auto" type="checkbox"> Auto</label></p>
+<h4>Expressions</h4>
+<div id="expr">
+<button data-expr="breathe">breathe</button>
+<button data-expr="glance">glance</button>
+<button data-expr="look_around">look_around</button>
+<button data-expr="head_tilt">head_tilt</button>
+<button data-expr="perk">perk</button>
+<button data-expr="droop">droop</button>
+<button data-expr="puppy_eyes">puppy_eyes</button>
+<button data-expr="nod">nod</button>
+<button data-expr="bounce">bounce</button>
+<button data-expr="wag">wag</button>
+<button data-expr="sniff">sniff</button>
+<button data-expr="double_take">double_take</button>
+<button data-expr="search">search</button>
+<button data-expr="startle">startle</button>
+<button data-expr="shake_off">shake_off</button>
+<button data-expr="proud">proud</button>
+<button data-expr="doze">doze</button>
+<button data-expr="lock_on">lock_on</button>
+<button data-expr="look_at_you">look_at_you</button>
+</div>
+<h4>Combo</h4>
+<div id="combo">(click expressions with the checkbox ticked to queue)</div>
+<p><label><input id="addcombo" type="checkbox"> add clicks to the combo</label>
+<button id="runcombo">Run combo</button> <button id="clearcombo">Clear</button></p>
+<p><a href="/previews">Preview clips</a></p>
+<script>
+var combo = [];
+var $ = function (id) { return document.getElementById(id); };
+function size() { return parseFloat($("size").value); }
+function post(path, body) {
+  return fetch(path, {method: "POST", body: JSON.stringify(body || {})}).then(function (r) {
+    return r.json().then(function (j) { if (r.status == 409) j.busy = true; if (r.status >= 400) $("status").textContent = "error " + r.status + ": " + JSON.stringify(j); return j; });
+  });
+}
+$("size").oninput = function () { $("sizev").textContent = size(); };
+["stage", "rest", "recover", "stop"].forEach(function (n) { $(n).onclick = function () { post("/" + n); }; });
+$("auto").onchange = function () { post("/auto", {on: $("auto").checked, size: size()}); };
+document.querySelectorAll("[data-expr]").forEach(function (b) {
+  b.onclick = function () {
+    var n = b.getAttribute("data-expr");
+    if ($("addcombo").checked) { combo.push(n); $("combo").textContent = combo.join(", "); }
+    else post("/express", {name: n, size: size()});
+  };
+});
+$("runcombo").onclick = function () { post("/combo", {names: combo, size: size()}); };
+$("clearcombo").onclick = function () { combo = []; $("combo").textContent = ""; };
+function poll() {
+  fetch("/status").then(function (r) { return r.json(); }).then(function (s) {
+    var t = "state: " + s.state + (s.busy ? " (busy)" : "") + " | mood: " + s.mood + " | auto: " + s.auto + (s.estopped ? " | E-STOPPED" : "");
+    if (s.last_refusal) t += " | last refusal: " + s.last_refusal.action + " " + s.last_refusal.error_code + " " + s.last_refusal.message;
+    $("status").textContent = t;
+    $("auto").checked = s.auto != "off";
+  }).catch(function () { $("status").textContent = "no connection"; });
+}
+setInterval(poll, 1000); poll();
+</script>
+</body></html>
