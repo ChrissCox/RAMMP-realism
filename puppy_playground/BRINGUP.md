@@ -90,7 +90,8 @@ a real goal is only checked at step 6.1. A failure prints the reason; do not go 
 container with `plan_only:=true`:
 
 ```
-sheppy up flatbot_empty_world      # rammp-deployments PR #150 branch
+cd ~/rammp-deployments/december_2026   # sheppy reads ./sheppy-manifest.yaml
+sheppy up flatbot_empty_world          # the chair-only scene (rammp-deployments PR #150)
 docker run --rm --network host --ipc host --env-file ~/puppy-env.list -v ~/puppy-data:/data \
     -v ~/rammp-deployments/december_2026/config/dds/cyclonedds.xml:/etc/cyclonedds/config.xml:ro \
     --name puppy puppy-playground \
