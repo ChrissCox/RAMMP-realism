@@ -208,17 +208,19 @@ def _worst(excess, what, names=None):
     return int(i), f"{what} {name}: over by {excess[i, j]:.6g}"
 
 
-def path_violations(points, chain, scene, caps=DEFAULT_CAPS, person_floor_ref=None):
+def path_violations(points, chain, scene, caps=DEFAULT_CAPS, person_floor_ref=None, obstacle_floor_ref=None):
     """Every stage-path rule the path `points` [(t, q, dq), ...] breaks, as Violations.
     `person_floor_ref` (shape (4,), one per part): the person clearances the path may not fall below;
-    default None = the first sample's own clearances."""
+    default None = the first sample's own clearances.
+    `obstacle_floor_ref` (shape (4,)): likewise for the obstacle clearances (the floor is
+    min(ref, OBSTACLE_KEEP_M)); default None = the first sample's own."""
     try:
-        return _path_violations(points, chain, scene, caps, person_floor_ref)
+        return _path_violations(points, chain, scene, caps, person_floor_ref, obstacle_floor_ref)
     except Exception as e:  # a malformed path must not take the caller down
         return [Violation("path_ends", 0, f"cannot check the path: {type(e).__name__}: {e}")]
 
 
-def _path_violations(points, chain, scene, caps, person_floor_ref=None):
+def _path_violations(points, chain, scene, caps, person_floor_ref=None, obstacle_floor_ref=None):
     t = np.array([p[0] for p in points], dtype=float)
     q, dq = _arrays(points)
     n = len(t)
@@ -266,6 +268,7 @@ def _path_violations(points, chain, scene, caps, person_floor_ref=None):
         "path_person_monotone",
         _worst(np.where(reached, PERSON_STAGE_M - far, 0.0) - FLOOR_TOL, "back under 0.35 m from the person,", far_names),
     )
-    floor = np.minimum(obstacle[0], OBSTACLE_KEEP_M) - OBSTACLE_TOL_M
+    oref = obstacle[0] if obstacle_floor_ref is None else np.asarray(obstacle_floor_ref, dtype=float)
+    floor = np.minimum(oref, OBSTACLE_KEEP_M) - OBSTACLE_TOL_M
     add("path_obstacle", _worst(floor - obstacle, "obstacle clearance,", PARTS))
     return out

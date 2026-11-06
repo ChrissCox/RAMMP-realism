@@ -138,3 +138,14 @@ def test_person_floor_ref_replaces_the_first_samples_clearances(chain, slow0):
     assert "path_person_floor" not in low
     high = path_violations(slow0, chain, scene, person_floor_ref=first + 5.0)
     assert "path_person_floor" in rules(high)
+
+
+def test_obstacle_floor_ref_replaces_the_first_samples_clearances(chain, slow0):
+    from puppy_motion.geometry import clearances_batch
+
+    scene = chair_scene()
+    first = clearances_batch(chain, scene, np.asarray(slow0[0][1], dtype=float)[None, :], False)[0, 1, :]
+    default = rules(path_violations(slow0, chain, scene))
+    assert rules(path_violations(slow0, chain, scene, obstacle_floor_ref=first)) == default  # None == the first sample
+    assert "path_obstacle" not in rules(path_violations(slow0, chain, scene, obstacle_floor_ref=first - 5.0))
+    assert "path_obstacle" in rules(path_violations(slow0, chain, scene, obstacle_floor_ref=first + 5.0))

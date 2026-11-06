@@ -100,7 +100,10 @@ docker run --rm --network host --ipc host --env-file ~/puppy-env.list -v ~/puppy
     ros2 launch puppy_playground playground.launch.py use_orchestrator:=false plan_only:=true
 ```
 
-Attended: hand on the e-stop, nobody in the chair, the arm at rest. Open `http://<snorlax>:8080/` and
+Attended: hand on the e-stop, nobody in the chair. Park the arm anywhere still and clear (for example
+Kinova Home); the plan starts from wherever it is, and Stage and Rest later use that spot as "rest".
+If Plan stage refuses `bad_start`, the arm is outside a joint limit or too close to an obstacle: move
+it by hand and try again. Open `http://<snorlax>:8080/` and
 press **only "Plan stage (no motion)"**, the button set apart from the motion buttons. Press nothing
 else: with `plan_only` the engine refuses every other action, but do not rely on that. The line beside
 the button says "candidate written" or shows why none was (`no_candidate` and its message). (Or, on
@@ -162,12 +165,12 @@ Nobody in the chair, you on the chair's right side by the joystick, hand on the 
 `http://<snorlax>:8080/`. Keep the size at 0.25 until step 7.
 
 1. **Stage.** This is the first and slowest motion: watch it whole. (Stage has no size.) Press it
-   only with the arm at rest. If the driver rejects the goal, stop here and read `last_refusal` in
+   only with the arm where you ran Plan stage (within 0.02 rad of the approved path's start). If the driver rejects the goal, stop here and read `last_refusal` in
    `/status`; this is the first real check of the driver accepting the goal under `flatbot`.
 2. **Each expression once at size 0.25**, one at a time, watching the whole beat. Watch **wag**,
    **lock_on** and **bounce** most closely: the driver model predicts up to 31 mm of overshoot on these
    without acceleration feedforward. Stop at any beat that looks wrong.
-3. **Rest.** The arm goes back along the approved path in reverse. If Rest refuses `not_at_end`
+3. **Rest (back to where Stage started).** The arm goes back along the approved path in reverse. If Rest refuses `not_at_end`
    (the arm sagged off the stage pose), press **Recover**, then Rest.
 
 Continuous joints read in (-pi, pi] from the driver. The engine compares and sends them modulo whole
@@ -176,8 +179,8 @@ turns, so a joint that reads wrapped is not a fault.
 ## 7. Full size
 
 Repeat the expressions at size 1.0 (the size slider), the same way: one each, hand on the e-stop,
-wag, lock_on and bounce first. Then **Rest** if the arm is still at stage (if it refuses `not_at_end`, press Recover, then Rest). If the arm is at rest,
-press Stage again first.
+wag, lock_on and bounce first. Then **Rest** if the arm is still at stage (if it refuses `not_at_end`, press Recover, then Rest). If the arm is back at
+its start, press Stage again first.
 
 ## 8. Auto
 
@@ -194,7 +197,7 @@ off: release it and turn Auto on again.
 
 ## 9. Rest
 
-Turn Auto off, press **Rest**, confirm the arm is back at rest, then stop the container (Ctrl-C).
+Turn Auto off, press **Rest**, confirm the arm is back where Stage started, then stop the container (Ctrl-C).
 If Rest refuses `not_at_end` after the arm sagged, press **Recover**, then Rest.
 
 ## If something goes wrong

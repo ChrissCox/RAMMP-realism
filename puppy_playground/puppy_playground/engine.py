@@ -25,7 +25,6 @@ from puppy_motion.escape import escape_path, grown_scene
 from puppy_motion.flatbot import CHAIR_LAYERS_COMMIT, chair_scene
 from puppy_motion.geometry import clearances_batch
 from puppy_motion.joints import align_turns, shortest_delta
-from puppy_motion.stage import REST_Q
 from puppy_motion.track import DT, Zone
 from puppy_motion.urdf import Chain
 from puppy_motion.validate import check_beat
@@ -146,18 +145,47 @@ class PuppyPlayground(CapabilityEngine):
             return True
         return not np.isfinite(pos) or 0.05 < pos < 0.93
 
-    def _path_violations(self, points, chain, margin, person_floor_ref=None):
+    def _path_violations(self, points, chain, margin, person_floor_ref=None, obstacle_floor_ref=None):
         """The stage-path rules on `points` against the chair scene grown by `margin` metres.
-        `person_floor_ref`: see puppy_motion.stage.path_violations (default: the first sample)."""
+        `person_floor_ref`: see puppy_motion.stage.path_violations (default: the first sample).
+        `obstacle_floor_ref`: likewise for the obstacle clearances."""
         return stage_rules.path_violations(
-            points, chain, grown_scene(chair_scene(), margin), person_floor_ref=person_floor_ref
+            points, chain, grown_scene(chair_scene(), margin),
+            person_floor_ref=person_floor_ref, obstacle_floor_ref=obstacle_floor_ref,
         )
 
     @staticmethod
-    def _person_clearances(chain, q, margin):
-        """The four per-part person clearances at q (against the scene grown by `margin`)."""
+    def _clearances(chain, q, margin):
+        """(person, obstacle): the four per-part clearances at q (against the scene grown by `margin`)."""
         scene = grown_scene(chair_scene(), margin)
-        return clearances_batch(chain, scene, np.asarray(q, dtype=float)[None, :], False)[0, 0, :]
+        c = clearances_batch(chain, scene, np.asarray(q, dtype=float)[None, :], False)[0]
+        return c[0], c[1]
+
+    @classmethod
+    def _person_clearances(cls, chain, q, margin):
+        return cls._clearances(chain, q, margin)[0]
+
+    @classmethod
+    def _obstacle_clearances(cls, chain, q, margin):
+        return cls._clearances(chain, q, margin)[1]
+
+    @classmethod
+    def _bad_start(cls, chain, q):
+        """Why q cannot be a plan_stage start (None when it can): outside the URDF limits or the
+        joint guards, or closer to an obstacle than the path rules allow."""
+        lo, hi = chain.pos_limits[:, 0], chain.pos_limits[:, 1]
+        if np.any(q < lo) or np.any(q > hi):
+            j = int(np.argmax(np.maximum(lo - q, q - hi)))
+            return f"joint {j + 1} is outside its URDF range"
+        over = np.abs(q) - stage_rules.guard_limits(chain)
+        if np.any(over > 1e-9):
+            return f"joint {int(np.argmax(over)) + 1} is past its guard"
+        obstacle = cls._obstacle_clearances(chain, q, stage_store.MARGIN_M)
+        if not np.all(np.isfinite(obstacle)):
+            return "the obstacle clearance is not finite"
+        if np.any(obstacle < stage_rules.OBSTACLE_KEEP_M - stage_rules.OBSTACLE_TOL_M):
+            return f"the arm is within {float(obstacle.min()):.3f} m of an obstacle"
+        return None
 
     def _load(self, path, urdf_text, chain, stage_q):
         """The StagePath in `path`, re-checked once per engine start (cached by file hash)."""
@@ -210,12 +238,15 @@ class PuppyPlayground(CapabilityEngine):
         if full_rules:
             # the person floor is anchored at the WORSE of where the arm is and where the approved
             # path starts: the blend may come no closer to the person than either
-            ref = np.minimum(
-                self._person_clearances(chain, q, stage_store.MARGIN_M),
-                self._person_clearances(chain, points[0][1], stage_store.MARGIN_M),
-            )
+            # (and the obstacle floor likewise)
+            p_now, o_now = self._clearances(chain, q, stage_store.MARGIN_M)
+            p_start, o_start = self._clearances(chain, points[0][1], stage_store.MARGIN_M)
+            ref, oref = np.minimum(p_now, p_start), np.minimum(o_now, o_start)
             rec["person_floor_ref"] = [float(x) for x in ref]
-            bad = self._path_violations(blended, chain, stage_store.MARGIN_M, person_floor_ref=ref)
+            rec["obstacle_floor_ref"] = [float(x) for x in oref]
+            bad = self._path_violations(
+                blended, chain, stage_store.MARGIN_M, person_floor_ref=ref, obstacle_floor_ref=oref
+            )
         else:
             bad = self._caps_ends(blended, chain)
         rec["checks"] = [f"{v.rule}: {v.detail}" for v in bad]
@@ -290,8 +321,9 @@ class PuppyPlayground(CapabilityEngine):
         urdf_text, chain = self._urdf()
         stage_q = self._stage_q(chain)
         q = self._still_q()
-        if not self._near(chain, q, REST_Q, AT_TOL_RAD):
-            raise EngineError("not_at_rest", "plan_stage plans from the rest pose; the arm is not there", recoverable=True)
+        why = self._bad_start(chain, q)
+        if why:
+            raise EngineError("bad_start", f"plan_stage cannot plan from where the arm is: {why}", recoverable=True)
         target = q + shortest_delta(chain, q, stage_q)  # the stage pose on the turn nearest the reading
         tried, found = {}, None
         for method in ("curobo", "min_jerk", "escape"):

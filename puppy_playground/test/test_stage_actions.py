@@ -341,11 +341,82 @@ def test_a_changed_approved_file_is_rechecked_after_a_cached_ok(env, urdf_text, 
     assert not env.fake.goals["execute_joint_trajectory"]
 
 
-def test_plan_stage_refuses_from_elsewhere(env):
-    env.at(HOME + 0.3)
+KINOVA_HOME = np.deg2rad([0.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0])  # Kinova Home, in the engine's joint convention
+
+
+def test_plan_stage_plans_from_a_kinova_home_like_start_and_stage_replays_it(env, urdf_text, stage_q):
+    from puppy_motion.escape import grown_scene
+    from puppy_motion.stage import path_violations
+
+    env.at(KINOVA_HOME)
     res = env.run("plan_stage")
-    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "not_at_rest")
-    assert not env.fake.goals["plan_to_joints"]
+    assert res.status == Result.STATUS_SUCCESS, (res.error_code, res.payload_json)
+    chain = Chain.from_urdf(urdf_text)
+    cand = stage_store.load(env.cand_file, urdf_text, stage_q, chain)
+    assert np.allclose(cand.points[0][1], KINOVA_HOME, atol=1e-6) and np.allclose(cand.q_rest, KINOVA_HOME, atol=1e-6)
+    assert not path_violations(cand.points, chain, grown_scene(chair_scene(), stage_store.MARGIN_M))
+    env.cand_file.replace(env.stage_file)  # approve
+    env.at(KINOVA_HOME)
+    res = env.run("stage")
+    assert res.status == Result.STATUS_SUCCESS, (res.error_code, res.payload_json)
+    assert env.fake.goals["execute_joint_trajectory"]
+
+
+def test_stage_refuses_from_elsewhere_than_the_approved_start(env, urdf_text, stage_q, path_points):
+    approve(env, urdf_text, stage_q, path_points)
+    env.at(HOME + 0.3)
+    res = env.run("stage")
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "not_at_start")
+    assert not env.fake.goals["execute_joint_trajectory"]
+
+
+def test_plan_stage_from_a_start_in_collision_refuses_bad_start_and_writes_nothing(env, monkeypatch):
+    monkeypatch.setattr(
+        env.engine, "_obstacle_clearances", lambda chain, q, margin: np.array([0.0, 0.2, 0.2, 0.2])
+    )
+    env.at(HOME)
+    res = env.run("plan_stage")
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "bad_start")
+    assert "obstacle" in json.loads(res.payload_json)["message"]
+    assert not env.cand_file.exists() and not env.fake.goals["plan_to_joints"]
+
+
+def test_plan_stage_from_a_start_past_a_joint_limit_refuses_bad_start(env, urdf_text):
+    chain = Chain.from_urdf(urdf_text)
+    q = HOME.copy()
+    q[1] = chain.pos_limits[1, 1] + 0.05  # a limited joint
+    env.at(q)
+    res = env.run("plan_stage")
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "bad_start")
+    assert not env.cand_file.exists()
+
+
+def test_the_obstacle_floor_is_anchored_like_the_person_floor(env, urdf_text, stage_q, path_points, monkeypatch):
+    approve(env, urdf_text, stage_q, path_points)
+    chain = Chain.from_urdf(urdf_text)
+    refs = []
+    real = env.engine._path_violations
+
+    def spy(pts, chain_, margin, person_floor_ref=None, obstacle_floor_ref=None):
+        if obstacle_floor_ref is not None:
+            refs.append(np.array(obstacle_floor_ref))
+        return real(pts, chain_, margin, person_floor_ref, obstacle_floor_ref)
+
+    monkeypatch.setattr(env.engine, "_path_violations", spy)
+    c_stored = env.engine._obstacle_clearances(chain, path_points[0][1], stage_store.MARGIN_M)
+    for off in (0.005, 0.01, 0.015):  # the reviewer's case: a j1 offset from the stored start
+        refs.clear()
+        reading = HOME.copy()
+        reading[0] += off
+        env.at(reading)
+        res = env.run("stage")
+        assert res.status == Result.STATUS_SUCCESS, (off, res.error_code, res.payload_json)
+        c_reading = env.engine._obstacle_clearances(chain, reading, stage_store.MARGIN_M)
+        assert np.allclose(refs[0], np.minimum(c_reading, c_stored), atol=1e-9)
+        env.fake.goals["execute_joint_trajectory"].clear()
+        env.at(stage_q)
+        assert env.run("rest").status == Result.STATUS_SUCCESS
+        env.fake.goals["execute_joint_trajectory"].clear()
 
 
 def test_plan_stage_with_no_passing_plan_deletes_a_stale_candidate_and_fails_saying_what_was_tried(env, monkeypatch):
@@ -613,9 +684,9 @@ def test_a_blended_path_that_breaks_a_rule_is_refused_and_nothing_is_sent(
         monkeypatch.setattr(
             env.engine,
             "_path_violations",
-            lambda pts, chain, margin, person_floor_ref=None: bad
+            lambda pts, chain, margin, person_floor_ref=None, obstacle_floor_ref=None: bad
             if off_start(pts)
-            else real_full(pts, chain, margin, person_floor_ref),
+            else real_full(pts, chain, margin, person_floor_ref, obstacle_floor_ref),
         )
     else:
         monkeypatch.setattr(env.engine, "_caps_ends", lambda pts, chain: bad if off_start(pts) else real_caps(pts, chain))
@@ -651,10 +722,10 @@ def test_the_person_floor_is_the_worse_of_the_reading_and_the_stored_start(
     refs = []
     real = env.engine._path_violations
 
-    def spy(pts, chain_, margin, person_floor_ref=None):
+    def spy(pts, chain_, margin, person_floor_ref=None, obstacle_floor_ref=None):
         if person_floor_ref is not None:
             refs.append(np.array(person_floor_ref))
-        return real(pts, chain_, margin, person_floor_ref)
+        return real(pts, chain_, margin, person_floor_ref, obstacle_floor_ref)
 
     monkeypatch.setattr(env.engine, "_path_violations", spy)
     env.at(reading)
