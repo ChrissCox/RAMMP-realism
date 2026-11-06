@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1
+
+# box_opening with Puppy Mode: the robot's own box_opening image plus puppy_motion and puppy_mode_ros.
+# Built on the robot computer (arm64) from the REPO ROOT:
+#   DOCKER_BUILDKIT=0 nice -n 19 docker build --cpuset-cpus 8-11 \
+#       -f puppy_mode_ros/robot/Dockerfile.box_opening -t box_opening:v2-105f74e-puppy .
+# Nothing in the base changes: the user, entrypoint (/ros_entrypoint.sh), workdir and default
+# command are the base's. Only two pure-Python packages are added, with --no-deps.
+ARG BASE=box_opening:v2-105f74e
+FROM ${BASE}
+
+# The base's pip (Ubuntu 22.04, 22.0.2) builds a pyproject-only package as an empty UNKNOWN-0.0.0
+# wheel, so pin a newer pip first. The base already has numpy 1.26.4 (/usr/local), scipy and PyYAML;
+# --no-deps keeps pip from touching any of them.
+COPY puppy_motion/ /tmp/puppy_motion/
+COPY puppy_mode_ros/ /tmp/puppy_mode_ros/
+RUN python3 -m pip install --no-cache-dir pip==24.3.1 \
+    && python3 -m pip install --no-cache-dir --no-deps /tmp/puppy_motion /tmp/puppy_mode_ros \
+    && rm -rf /tmp/puppy_motion /tmp/puppy_mode_ros
+
+# Fail the build, not the robot run, if anything the launcher imports is missing, on the wrong numpy,
+# or an empty (UNKNOWN) wheel.
+RUN bash -c '. /opt/ros/humble/setup.bash && . /ros2_ws/install/setup.bash && . /module_ws/install/setup.bash \
+    && python3 -W ignore -c "import numpy, puppy_motion.director, puppy_mode_ros.hook, puppy_mode_ros.player, \
+puppy_mode_ros.proxies, puppy_mode_ros.launch, box_opening.node; \
+assert numpy.__version__ == \"1.26.4\", numpy.__version__; print(\"imports ok\", numpy.__version__)" \
+    && python3 -m pip show puppy-motion | grep -q "^Name: puppy-motion" \
+    && python3 -m pip show puppy-mode-ros | grep -q "^Name: puppy-mode-ros"'
+
+# Run box_opening with the hook (BRINGUP.md has the whole command):
+#   python3 -m puppy_mode_ros.launch box_opening.node:Capability box_opening.node:main --ros-args ...

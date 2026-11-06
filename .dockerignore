@@ -1,6 +1,7 @@
 *
 !puppy_motion/
 !puppy_playground/
+!puppy_mode_ros/
 **/__pycache__
 **/*.egg-info
 **/.pytest_cache
