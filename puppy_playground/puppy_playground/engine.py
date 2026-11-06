@@ -10,19 +10,23 @@ do not apply to the reversed order (it ends at rest, inside the torso box), so t
 gates it, plus the cap and ends rules on the reversed points themselves."""
 
 import json
+import os
 import time
 from importlib import resources
 
 import numpy as np
 from capability_engine.arm import IMPEDANCE, QUEUE
 from capability_engine.engine import Action, CapabilityEngine, EngineError, run
+from capability_engine.sim import SimModelError
 
 from puppy_motion import stage as stage_rules
 from puppy_motion.escape import escape_path, grown_scene
 from puppy_motion.flatbot import CHAIR_LAYERS_COMMIT, chair_scene
+from puppy_motion.joints import align_turns, shortest_delta
+from puppy_motion.stage import REST_Q
 from puppy_motion.track import DT, Zone
 from puppy_motion.urdf import Chain
-from puppy_motion.validate import Violation, check_beat
+from puppy_motion.validate import check_beat
 
 from . import motion, stage_store
 
@@ -80,7 +84,10 @@ class PuppyPlayground(CapabilityEngine):
     # -- helpers ---------------------------------------------------------------------------------
 
     def _urdf(self):
-        text = self.arm.robot_description()
+        try:
+            text = self.arm.robot_description()
+        except SimModelError as e:
+            raise EngineError("no_model", f"the arm has no model: {e}")
         sha = stage_store.urdf_hash(text)
         if sha not in self._chains:
             try:
@@ -99,10 +106,20 @@ class PuppyPlayground(CapabilityEngine):
         return q
 
     def _still_q(self):
+        """The measured joints, refusing unless every one is finite and every |dq| < STILL_RAD_S."""
         js = self.arm.joint_states()
-        if np.abs(js.velocity).max() >= STILL_RAD_S:
+        pos, vel = np.asarray(js.position, dtype=float), np.asarray(js.velocity, dtype=float)
+        if pos.shape != (7,) or vel.shape != (7,) or not np.isfinite(pos).all():
+            raise EngineError("bad_state", "the joint reading is malformed", recoverable=True)
+        if not (np.abs(vel).max() < STILL_RAD_S):  # a NaN velocity refuses too
             raise EngineError("not_still", "the arm is moving", recoverable=True)
-        return np.array(js.position, dtype=float)
+        return pos
+
+    @staticmethod
+    def _near(chain, q, target, tol):
+        """Whether q is within tol rad of target on every joint, modulo whole turns of the
+        continuous joints (the driver reports those wrapped). NaN is never near."""
+        return bool(np.all(np.abs(shortest_delta(chain, q, target)) <= tol))
 
     def _held(self):
         try:
@@ -116,20 +133,25 @@ class PuppyPlayground(CapabilityEngine):
         return stage_rules.path_violations(points, chain, grown_scene(chair_scene(), margin))
 
     def _load(self, path, urdf_text, chain, stage_q):
-        """The StagePath in `path`, re-checked once per engine start (cached)."""
+        """The StagePath in `path`, re-checked once per engine start (cached by file hash)."""
         try:
-            sp = stage_store.load(path, urdf_text, stage_q)
+            sp = stage_store.load(path, urdf_text, stage_q, chain)
         except stage_store.StageStoreError as e:
             raise EngineError(e.code, str(e))
         key = (sp.file_sha256, CHAIR_LAYERS_COMMIT, stage_store.urdf_hash(urdf_text))
         if key not in self._checked:
-            self._checked[key] = self._path_violations(sp.points, chain, sp.margin_m)
+            # never looser than the margin this engine writes candidates with
+            self._checked[key] = self._path_violations(sp.points, chain, max(sp.margin_m, stage_store.MARGIN_M))
         if self._checked[key]:
             v = self._checked[key][0]
             raise EngineError("unsafe_stage_path", f"{v.rule}: {v.detail}")
         return sp
 
-    def _send(self, chain, points, rec):
+    def _send(self, chain, points, q_measured, rec):
+        """Send `points` turned (whole turns of the continuous joints, the same for every point) to
+        the measured reading; clearances are 2*pi-periodic and those joints have no limits, so the
+        checked path is unchanged."""
+        points = align_turns(chain, q_measured, points)
         rec["goal"] = {"points": len(points), "seconds": points[-1][0], "control_mode": "IMPEDANCE", "gains": "default"}
         res = self.arm.execute_joint_trajectory(
             chain.joint_names, points, control_mode=IMPEDANCE, gains="default", preemption=QUEUE
@@ -175,102 +197,131 @@ class PuppyPlayground(CapabilityEngine):
             self._log(rec)
 
     def _plan_stage(self, ctx, rec):
+        if os.path.abspath(self.candidate_path) == os.path.abspath(self.stage_path):
+            raise EngineError("bad_config", "playground.candidate_path must differ from playground.stage_path")
+        ctx.checkpoint()
         urdf_text, chain = self._urdf()
         stage_q = self._stage_q(chain)
         q = self._still_q()
-        ctx.checkpoint()
-        plan = self.arm.plan_to_joints(stage_q, q)  # nothing moves
-        points, used = None, "curobo"
-        if plan.success and len(plan.t) >= 2:
-            grid = np.arange(0.0, plan.t[-1] + 1e-9, DT)
-            qs = np.stack([np.interp(grid, plan.t, plan.q[:, j]) for j in range(7)], axis=1)
-            qs[0], qs[-1] = q, stage_q
-            points = stage_rules.retime_path(stage_rules.points_from_q(qs), chain)
-        violations = [] if points is None else self._path_violations(points, chain, stage_store.MARGIN_M)
-        if points is None or violations:
-            rec["curobo"] = plan.message if points is None else [f"{v.rule}: {v.detail}" for v in violations[:3]]
+        if not self._near(chain, q, REST_Q, AT_TOL_RAD):
+            raise EngineError("not_at_rest", "plan_stage plans from the rest pose; the arm is not there", recoverable=True)
+        target = q + shortest_delta(chain, q, stage_q)  # the stage pose on the turn nearest the reading
+        tried, found = {}, None
+        for method in ("curobo", "min_jerk", "escape"):
             ctx.checkpoint()
-            used = "escape_path"
             try:
-                points = escape_path(chain, chair_scene(), q, stage_q)
-                violations = self._path_violations(points, chain, stage_store.MARGIN_M)
+                points = self._candidate_points(method, chain, q, target, rec)
             except ValueError as e:
-                points, violations = None, [Violation("escape", 0, str(e))]
-        if points is not None:
-            stage_store.save(self.candidate_path, points, urdf_text, stage_q)
+                tried[method] = [f"{type(e).__name__}: {e}"]
+                continue
+            if points is None:
+                tried[method] = ["no plan"]
+                continue
+            bad = [f"{v.rule}: {v.detail}" for v in self._path_violations(points, chain, stage_store.MARGIN_M)]
+            if not bad:
+                stub = stage_store.StagePath(points, points[0][1], target, "", 0.0, "")
+                try:
+                    stage_store.check_endpoints(stub, chain, stage_q)
+                except stage_store.StageStoreError as e:
+                    bad = [f"{e.code}: {e}"]
+            tried[method] = bad
+            if not bad:
+                found = (method, points)
+                break
+        if found is None:
             try:
-                stage_store.check_endpoints(stage_store.load(self.candidate_path, urdf_text))
-            except stage_store.StageStoreError as e:
-                violations = list(violations) + [Violation(e.code, 0, str(e))]
-        out = {
-            "violations": [f"{v.rule}: {v.detail}" for v in violations],
-            "candidate": self.candidate_path if points is not None else None,
-            "planner": used,
-        }
+                os.remove(self.candidate_path)  # a stale candidate must not look like this plan's
+            except FileNotFoundError:
+                pass
+            out = {"violations": [f"{m}: {v}" for m, vs in tried.items() for v in vs], "candidate": None, "method": None}
+        else:
+            method, points = found
+            stage_store.save(self.candidate_path, points, urdf_text, stage_q, method=method)
+            out = {"violations": [], "candidate": self.candidate_path, "method": method}
+        rec["tried"] = tried
         rec["result"] = out
         return out
 
+    def _candidate_points(self, method, chain, q, target, rec):
+        """One planner's retimed points from q to target (None when it has no plan)."""
+        if method == "curobo":
+            plan = self.arm.plan_to_joints(target, q)  # nothing moves
+            if not (plan.success and len(plan.t) >= 2):
+                rec["curobo"] = plan.message
+                return None
+            grid = np.arange(0.0, plan.t[-1] + 1e-9, DT)
+            qs = np.stack([np.interp(grid, plan.t, plan.q[:, j]) for j in range(7)], axis=1)
+            qs[0], qs[-1] = q, target
+            return stage_rules.retime_path(stage_rules.points_from_q(qs), chain)
+        if method == "min_jerk":
+            seconds = max(2.0, float(np.abs(target - q).max()) / 0.2)
+            return stage_rules.retime_path(stage_rules.min_jerk_path(q, target, seconds), chain)
+        return escape_path(chain, chair_scene(), q, target)
+
     def _stage(self, ctx, rec):
+        ctx.checkpoint()
         urdf_text, chain = self._urdf()
         sp = self._load(self.stage_path, urdf_text, chain, self._stage_q(chain))
         q = self._still_q()
-        if np.abs(q - sp.points[0][1]).max() > AT_TOL_RAD:
+        if not self._near(chain, q, sp.points[0][1], AT_TOL_RAD):
             raise EngineError("not_at_start", "the arm is not at the path's start (rest)")
-        ctx.checkpoint()
-        self._send(chain, sp.points, rec)
+        self._send(chain, sp.points, q, rec)
         return {"points": len(sp.points)}
 
     def _rest(self, ctx, rec):
+        ctx.checkpoint()
         urdf_text, chain = self._urdf()
         sp = self._load(self.stage_path, urdf_text, chain, self._stage_q(chain))
-        q = self._still_q()
-        if np.abs(q - sp.points[-1][1]).max() > AT_TOL_RAD:
-            raise EngineError("not_at_end", "the arm is not at the path's end (stage)")
         pts = stage_rules.points_from_q(np.array([p[1] for p in sp.points])[::-1])
         bad = self._caps_ends(pts, chain)
         rec["checks"] = [f"{v.rule}: {v.detail}" for v in bad]
         if bad:
             raise EngineError("unsafe_stage_path", f"reversed path: {bad[0].rule}: {bad[0].detail}")
-        ctx.checkpoint()
-        self._send(chain, pts, rec)
+        q = self._still_q()
+        if not self._near(chain, q, sp.points[-1][1], AT_TOL_RAD):
+            raise EngineError("not_at_end", "the arm is not at the path's end (stage)")
+        self._send(chain, pts, q, rec)
         return {"points": len(pts)}
 
     def _recover(self, ctx, rec):
+        ctx.checkpoint()
         urdf_text, chain = self._urdf()
         stage_q = self._stage_q(chain)
+        try:  # only needed off the stage pose; loaded (and re-checked) before measuring
+            sp = self._load(self.stage_path, urdf_text, chain, stage_q)
+        except EngineError:
+            sp = None
         q = self._still_q()
-        if np.abs(q - stage_q).max() <= RECOVER_STAGE_RAD:
-            seconds = max(1.0, float(np.abs(stage_q - q).max()) / 0.2)
-            pts = stage_rules.retime_path(stage_rules.min_jerk_path(q, stage_q, seconds), chain)
+        if self._near(chain, q, stage_q, RECOVER_STAGE_RAD):
+            target = q + shortest_delta(chain, q, stage_q)
+            seconds = max(1.0, float(np.abs(target - q).max()) / 0.2)
+            pts = stage_rules.retime_path(stage_rules.min_jerk_path(q, target, seconds), chain)
             # check_beat expects a beat that returns to q_start; this move ends at the stage pose,
             # so only that one rule ("end") is waived, every other rule applies
             bad = [v for v in check_beat(pts, q, chain, chair_scene(), Zone.FREE, held=self._held()) if v.rule != "end"]
             rec["checks"] = [f"{v.rule}: {v.detail}" for v in bad]
             if bad:
                 raise EngineError("unsafe_move", f"{bad[0].rule}: {bad[0].detail}")
-            ctx.checkpoint()
-            self._send(chain, pts, rec)
+            self._send(chain, pts, q, rec)
             return {"recovered": "to_stage", "points": len(pts)}
-        try:
-            sp = self._load(self.stage_path, urdf_text, chain, stage_q)
-        except EngineError:
+        if sp is None:
             raise EngineError("recover_by_hand", "not near the stage pose and no usable stage path: recover by hand")
         qs = np.array([p[1] for p in sp.points])
-        err = np.abs(qs - q).max(axis=1)
+        err = np.array([np.abs(shortest_delta(chain, q, x)).max() for x in qs])
         i = int(np.argmin(err))
-        if err[i] > AT_TOL_RAD:
+        if not (err[i] <= AT_TOL_RAD):
             raise EngineError("recover_by_hand", "not near the stage pose or the stage path: recover by hand")
         if i == 0:
             return {"recovered": "already_at_rest"}
-        back = qs[: i + 1][::-1].copy()
-        back[0] = q
-        pts = stage_rules.retime_path(stage_rules.points_from_q(back), chain)
+        back = align_turns(chain, q, stage_rules.points_from_q(qs[: i + 1][::-1]))
+        arr = np.array([p[1] for p in back])
+        arr[0] = q
+        pts = stage_rules.retime_path(stage_rules.points_from_q(arr), chain)
         bad = self._caps_ends(pts, chain)
         rec["checks"] = [f"{v.rule}: {v.detail}" for v in bad]
         if bad:
             raise EngineError("unsafe_move", f"{bad[0].rule}: {bad[0].detail}")
-        ctx.checkpoint()
-        self._send(chain, pts, rec)
+        self._send(chain, pts, q, rec)
         return {"recovered": "along_path", "points": len(pts)}
 
 

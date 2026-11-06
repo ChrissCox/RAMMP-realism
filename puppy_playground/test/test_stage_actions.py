@@ -15,6 +15,8 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 
+from capability_engine.arm_messages import _impedance_gains
+
 from puppy_motion.escape import escape_path
 from puppy_motion.flatbot import chair_scene
 from puppy_motion.urdf import Chain
@@ -124,8 +126,9 @@ def test_plan_stage_sends_no_motion_goal_and_writes_a_candidate(env, urdf_text, 
     assert len(env.fake.goals["plan_to_joints"]) == 1
     out = json.loads(res.payload_json)
     assert out["violations"] == [] and out["candidate"] == str(env.cand_file)
-    sp = stage_store.load(env.cand_file, urdf_text, stage_q)  # endpoints check included
+    sp = stage_store.load(env.cand_file, urdf_text, stage_q, Chain.from_urdf(urdf_text))  # endpoints included
     assert sp.margin_m == stage_store.MARGIN_M
+    assert sp.method in ("curobo", "min_jerk", "escape") and sp.method == out["method"]
     assert not env.stage_file.exists()  # never approves itself
 
 
@@ -179,6 +182,7 @@ def test_stage_and_rest_send_the_path_forward_and_reversed(env, urdf_text, stage
     env.at(HOME)
     assert env.run("stage").status == Result.STATUS_SUCCESS
     g, pts = sent(env)
+    assert g.preemption == 0 and g.gains == _impedance_gains("default")  # QUEUE, the default profile
     assert g.control_mode == IMPEDANCE and list(g.trajectory.joint_names) == list(Chain.from_urdf(urdf_text).joint_names)
     assert len(pts) == len(path_points)
     for (q, _), (_, want, _) in zip(pts, path_points):
@@ -231,3 +235,143 @@ def test_each_request_leaves_one_log_line(env):
     env.run("stage")
     lines = (env.dir / "playground.jsonl").read_text().splitlines()
     assert len(lines) == 1 and json.loads(lines[0])["action"] == "stage"
+
+
+# ---- wrapped readings, load-time checks, ordering ------------------------------------------------
+
+
+def wrapped(q):
+    """What the real driver reads: continuous joints (1, 3, 5, 7) wrapped to (-pi, pi]."""
+    q = np.array(q, dtype=float)
+    for j in (0, 2, 4, 6):
+        q[j] = np.pi - np.mod(np.pi - q[j], 2 * np.pi)
+    return q
+
+
+def turn_shift_is_whole_and_uniform(sent, stored):
+    d = np.array(sent) - np.array(stored)
+    k = d / (2 * np.pi)
+    assert np.allclose(k[:, [1, 3, 5]], 0.0)  # revolute joints untouched
+    assert np.allclose(k, np.round(k), atol=1e-9) and np.allclose(k, k[0], atol=1e-9)
+    return k[0]
+
+
+def test_stage_works_from_a_wrapped_rest_reading_and_sends_the_path_on_that_turn(env, urdf_text, stage_q, path_points):
+    approve(env, urdf_text, stage_q, path_points)
+    reading = HOME.copy()
+    reading[2] = 3.141  # the driver's wrapped reading of j3 = -3.137 (a turn away from the stored value)
+    env.at(reading)
+    res = env.run("stage")
+    assert res.status == Result.STATUS_SUCCESS, res.error_code
+    g, pts = sent(env)
+    assert np.abs(pts[0][0] - reading)[[0, 2, 4, 6]].max() <= np.pi
+    assert np.abs(pts[0][0] - reading).max() <= 0.02
+    turn_shift_is_whole_and_uniform([q for q, _ in pts], [q for _, q, _ in path_points])
+    chain = Chain.from_urdf(urdf_text)
+    from puppy_motion.geometry import clearances
+
+    for (q, _), (_, want, _) in list(zip(pts, path_points))[::300]:
+        assert np.allclose(clearances(chain, chair_scene(), q, False), clearances(chain, chair_scene(), want, False), atol=1e-9)
+
+
+def test_rest_works_right_after_stage_when_the_driver_reports_wrapped_joints(env, urdf_text, stage_q, path_points):
+    approve(env, urdf_text, stage_q, path_points)
+    env.at(wrapped(HOME))
+    assert env.run("stage").status == Result.STATUS_SUCCESS
+    env.fake.goals["execute_joint_trajectory"].clear()
+    env.at(wrapped(stage_q))  # j3 reads 0.73, not -5.55
+    res = env.run("rest")
+    assert res.status == Result.STATUS_SUCCESS, res.error_code
+    g, pts = sent(env)
+    assert np.abs(pts[0][0] - wrapped(stage_q)).max() < 1e-6
+
+
+def test_recover_near_stage_and_on_the_path_work_with_wrapped_readings(env, urdf_text, stage_q, path_points):
+    approve(env, urdf_text, stage_q, path_points)
+    env.at(wrapped(stage_q + 0.05))
+    assert env.run("recover").status == Result.STATUS_SUCCESS
+    env.fake.goals["execute_joint_trajectory"].clear()
+    i = len(path_points) // 3
+    env.at(wrapped(path_points[i][1]))
+    res = env.run("recover")
+    assert res.status == Result.STATUS_SUCCESS, res.error_code
+    g, pts = sent(env)
+    assert np.abs(shortest(urdf_text, pts[-1][0], HOME)).max() < 1e-6
+
+
+def shortest(urdf_text, a, b):
+    from puppy_motion.joints import shortest_delta
+
+    return shortest_delta(Chain.from_urdf(urdf_text), a, b)
+
+
+@pytest.mark.parametrize("edit", ["nan_q_rest", "nan_stage_q", "nan_margin", "negative_margin", "inf_margin"])
+def test_stage_refuses_non_finite_or_negative_header_fields(env, urdf_text, stage_q, path_points, edit):
+    approve(env, urdf_text, stage_q, path_points)
+    doc = json.loads(env.stage_file.read_text())
+    if edit == "nan_q_rest":
+        doc["q_rest"][0] = float("nan")
+    elif edit == "nan_stage_q":
+        doc["stage_q"][3] = float("nan")
+    elif edit == "nan_margin":
+        doc["margin_m"] = float("nan")
+    elif edit == "inf_margin":
+        doc["margin_m"] = float("inf")
+    else:
+        doc["margin_m"] = -0.05
+    env.stage_file.write_text(json.dumps(doc))  # json.dumps writes NaN/Infinity, which json.loads reads back
+    env.at(HOME)
+    res = env.run("stage")
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "bad_stage_path")
+    assert not env.fake.goals["execute_joint_trajectory"]
+
+
+def test_a_changed_approved_file_is_rechecked_after_a_cached_ok(env, urdf_text, stage_q, path_points):
+    approve(env, urdf_text, stage_q, path_points)
+    env.at(HOME)
+    assert env.run("stage").status == Result.STATUS_SUCCESS
+    env.fake.goals["execute_joint_trajectory"].clear()
+    bad = [(t, q.copy(), dq.copy()) for t, q, dq in path_points]
+    mid = len(bad) // 2
+    bad[mid] = (bad[mid][0], bad[mid][1] + 0.5, bad[mid][2])  # a jump: breaks the caps
+    approve(env, urdf_text, stage_q, bad)
+    env.at(HOME)
+    res = env.run("stage")
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "unsafe_stage_path")
+    assert not env.fake.goals["execute_joint_trajectory"]
+
+
+def test_plan_stage_refuses_from_elsewhere_and_leaves_no_stale_candidate(env, stage_q):
+    env.cand_file.write_text("stale")
+    env.at(HOME + 0.3)
+    res = env.run("plan_stage")
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "not_at_rest")
+    assert not env.fake.goals["plan_to_joints"]
+
+
+def test_plan_stage_from_a_wrapped_rest_reading_writes_a_candidate(env, urdf_text, stage_q):
+    reading = HOME.copy()
+    reading[2] = 3.141
+    env.at(reading)
+    env.fake.plan_result([HOME, stage_q])
+    res = env.run("plan_stage")
+    assert res.status == Result.STATUS_SUCCESS, res.error_code
+    out = json.loads(res.payload_json)
+    assert out["violations"] == [] and env.cand_file.exists()
+    assert not env.fake.goals["execute_joint_trajectory"]
+
+
+def test_plan_stage_refuses_a_candidate_path_equal_to_the_stage_path(tmp_path):
+    rclpy.init()
+    try:
+        engine = PuppyPlayground(parameter_overrides=[
+            Parameter("use_orchestrator", value=False),
+            Parameter("playground.stage_path", value=str(tmp_path / "same.json")),
+            Parameter("playground.candidate_path", value=str(tmp_path / "same.json")),
+        ])
+        with pytest.raises(Exception) as e:
+            engine._plan_stage(None, {})
+        assert getattr(e.value, "error_code", "") == "bad_config"
+        engine.destroy_node()
+    finally:
+        rclpy.shutdown()

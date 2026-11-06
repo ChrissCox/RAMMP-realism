@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from puppy_motion.joints import shortest_delta
+
 VERSION = 1
 MARGIN_M = 0.002
 END_TOL = 1e-6
@@ -33,13 +35,14 @@ class StagePath:
     urdf_sha256: str
     margin_m: float
     file_sha256: str
+    method: str = ""
 
 
 def urdf_hash(urdf_text):
     return hashlib.sha256(urdf_text.encode("utf-8")).hexdigest()
 
 
-def save(path, points, urdf_text, stage_q, margin_m=MARGIN_M):
+def save(path, points, urdf_text, stage_q, margin_m=MARGIN_M, method=""):
     """Write the path atomically (temp file, then rename)."""
     doc = {
         "version": VERSION,
@@ -47,6 +50,7 @@ def save(path, points, urdf_text, stage_q, margin_m=MARGIN_M):
         "q_rest": [float(x) for x in points[0][1]],
         "stage_q": [float(x) for x in stage_q],
         "margin_m": float(margin_m),
+        "method": str(method),
         "points": [[float(t), [float(x) for x in q], [float(x) for x in dq]] for t, q, dq in points],
     }
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -56,21 +60,25 @@ def save(path, points, urdf_text, stage_q, margin_m=MARGIN_M):
     os.replace(tmp, path)
 
 
-def check_endpoints(sp):
-    """StageStoreError("bad_endpoints") unless the path starts at t=0 on q_rest and ends on stage_q."""
+def check_endpoints(sp, chain, stage_q):
+    """StageStoreError("bad_endpoints") unless the path starts at t=0 on its recorded rest pose and
+    ends on `stage_q`, both within 1e-6 rad modulo whole turns of the continuous joints (the driver
+    reports those wrapped). A NaN anywhere fails."""
     t0, q0, qn = sp.points[0][0], sp.points[0][1], sp.points[-1][1]
-    if t0 != 0.0:
+    if not (t0 == 0.0):
         raise StageStoreError("bad_endpoints", f"the path starts at t={t0}, not 0")
-    if np.abs(q0 - sp.q_rest).max() > END_TOL:
+    if not np.all(np.abs(shortest_delta(chain, sp.q_rest, q0)) <= END_TOL):
         raise StageStoreError("bad_endpoints", "the path does not start at its recorded rest pose")
-    if np.abs(qn - sp.stage_q).max() > END_TOL:
+    if not np.all(np.abs(shortest_delta(chain, np.asarray(stage_q, dtype=float), qn)) <= END_TOL):
         raise StageStoreError("bad_endpoints", "the path does not end at the stage pose")
+    if not np.all(np.abs(shortest_delta(chain, sp.stage_q, np.asarray(stage_q, dtype=float))) <= END_TOL):
+        raise StageStoreError("bad_endpoints", "the path's stage pose is not the current stage_pose.json")
 
 
-def load(path, urdf_text, stage_q=None):
+def load(path, urdf_text, stage_q=None, chain=None):
     """The StagePath in `path`. Raises StageStoreError if the file is missing (no_stage_path),
     unparseable (bad_stage_path), planned for another URDF (stale_stage_path), or, when `stage_q` is
-    given, does not start at t=0 on its recorded rest pose and end within 1e-6 rad of `stage_q`
+    given (with `chain`), does not start at t=0 on its recorded rest pose and end within 1e-6 rad of `stage_q`
     (bad_endpoints)."""
     try:
         with open(path, "rb") as f:
@@ -87,7 +95,12 @@ def load(path, urdf_text, stage_q=None):
         sp = StagePath(
             pts, np.array(doc["q_rest"], dtype=float), np.array(doc["stage_q"], dtype=float),
             str(doc["urdf_sha256"]), float(doc["margin_m"]), hashlib.sha256(raw).hexdigest(),
+            str(doc.get("method", "")),
         )
+        if not (np.isfinite(sp.q_rest).all() and np.isfinite(sp.stage_q).all()):
+            raise ValueError("q_rest and stage_q must be finite")
+        if not (np.isfinite(sp.margin_m) and sp.margin_m >= 0.0):
+            raise ValueError("margin_m must be finite and not negative")
         if sp.q_rest.shape != (7,) or sp.stage_q.shape != (7,):
             raise ValueError("q_rest and stage_q need 7 joints")
         if not all(np.isfinite(x).all() for _, q, dq in pts for x in (q, dq)):
@@ -97,7 +110,5 @@ def load(path, urdf_text, stage_q=None):
     if sp.urdf_sha256 != urdf_hash(urdf_text):
         raise StageStoreError("stale_stage_path", f"{path} was planned for another URDF")
     if stage_q is not None:
-        if np.abs(sp.stage_q - np.asarray(stage_q, dtype=float)).max() > END_TOL:
-            raise StageStoreError("bad_endpoints", "the path's stage pose is not the current stage_pose.json")
-        check_endpoints(sp)
+        check_endpoints(sp, chain, stage_q)
     return sp

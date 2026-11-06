@@ -1,11 +1,14 @@
 """The escape leg of a stage path: how the arm leaves rest, where it starts inside the torso box.
 
-A straight minimum-jerk move from rest to a stage pose dips 8-9 cm deeper into the person boxes
-than rest already is, which the stage-path rules refuse. escape_path first climbs the person-
-clearance gradient in small joint-space steps (no part's person clearance ever decreases, obstacle
-floors are kept) until the forearm, wrist and head are all clear of the person by PERSON_STAGE_M
-(plus a small margin), then moves on to the stage pose with a minimum-jerk blend, and retimes the
-whole polyline to the FREE caps. The result is meant to pass stage.path_violations; callers check.
+A straight minimum-jerk move from rest to some stage poses dips deeper into the person boxes than
+rest already is, which the stage-path rules refuse. escape_path first climbs the person-clearance
+gradient in small joint-space steps (a part never ends a step below its clearance at rest or more
+than CLIMB_DIP_M below the step before; obstacle floors are kept) until the forearm, wrist and head
+are all clear of the person by PERSON_STAGE_M plus MARGIN_M. It then routes to the stage pose through
+postures that keep every person floor (the straight line if that is feasible, else a seeded RRT,
+shortcut and smoothed), times the polyline with a cosine ease and retimes it to the FREE caps.
+It raises ValueError when no route is found. The result is meant to pass stage.path_violations;
+callers check.
 
 The rest move replays the stored path backwards: the same samples in reverse order, so it visits
 exactly the postures the forward path was checked on (see stage.path_violations).
@@ -15,6 +18,7 @@ import numpy as np
 
 from .caps import DEFAULT_CAPS, guard_limits
 from .geometry import PARTS, Box, Scene, clearances
+from .joints import continuous, shortest_delta
 from .stage import (
     OBSTACLE_KEEP_M, OBSTACLE_TOL_M, PERSON_STAGE_M, _FAR_PARTS, points_from_q, retime_path,
 )
@@ -87,7 +91,6 @@ def _climb(chain, scene, q_rest, lim, floor):
         g = _gradient(chain, scene, q)
         active = [j for j, d in zip(_FAR_PARTS, deficit) if d > 0.0]
         # least-norm step raising every active part at the same rate; the other parts must not drop
-        # (rows with a negative response are projected out below by the acceptance test + damping)
         A = g[active]
         rhs = np.minimum(deficit[deficit > 0.0], 0.05)
         step = A.T @ np.linalg.solve(A @ A.T + 1e-4 * np.eye(len(active)), rhs)
@@ -119,10 +122,9 @@ def _climb(chain, scene, q_rest, lim, floor):
 def unwrap_to(chain, q_ref, q):
     """`q` with each continuous joint (no range limit) turned by whole revolutions to the value
     nearest `q_ref`: the same posture, the shortest way round."""
-    q = np.asarray(q, dtype=float).copy()
-    cont = ~np.isfinite(guard_limits(chain))
-    q[cont] = q_ref[cont] + (q[cont] - q_ref[cont] + np.pi) % (2 * np.pi) - np.pi
-    return q
+    q_ref = np.asarray(q_ref, dtype=float)
+    q = np.asarray(q, dtype=float)
+    return np.where(continuous(chain), q_ref + shortest_delta(chain, q_ref, q), q)
 
 
 FAR_FLOOR_M = PERSON_STAGE_M + 0.005  # the far parts stay this far out once clear
@@ -197,78 +199,6 @@ def _plan(feasible, q0, q_goal, lim, seed=0):
     return way
 
 
-def unwrap_to(chain, q_ref, q):
-    """`q` with each continuous joint (no range limit) turned by whole revolutions to the value
-    nearest `q_ref`: the same posture, the shortest way round."""
-    q = np.asarray(q, dtype=float).copy()
-    cont = ~np.isfinite(guard_limits(chain))
-    q[cont] = q_ref[cont] + (q[cont] - q_ref[cont] + np.pi) % (2 * np.pi) - np.pi
-    return q
-
-
-FOLLOW_STEP_MIN, FOLLOW_STEP_MAX = 0.004, 0.06
-FOLLOW_SLACK_M = 0.004  # constraints are held this far inside their floors
-FAR_FLOOR_M = PERSON_STAGE_M + 0.005
-MAX_FOLLOW_STEPS = 3000
-
-
-def _follow(chain, scene, q, q_goal, person_floor, obstacle_floor, lim):
-    """Waypoints from q toward q_goal. Each step heads for the goal; a step that would push a
-    person-clearance row (or an obstacle row) under its floor is projected so that row holds (or
-    rises), and a step that still fails is halved. Raises ValueError when stuck."""
-    q = q.copy()
-    path = [q.copy()]
-    c_prev = clearances(chain, scene, q, False)
-    h = FOLLOW_STEP_MAX
-    for _ in range(MAX_FOLLOW_STEPS):
-        d = q_goal - q
-        m = np.abs(d).max()
-        import os
-        if os.environ.get('ESC_DBG') and len(path) % 10 == 0:
-            print(len(path), round(m, 3), round(h, 4), c_prev[0].round(3))
-        if m < 1e-9:
-            return path
-        if m <= h:
-            h_eff = m
-        else:
-            h_eff = h
-        step = d * (h_eff / m)
-        for attempt in range(2):
-            q_new = q + step
-            if np.all(np.abs(q_new) <= lim):
-                c = clearances(chain, scene, q_new, False)
-                ok = (not np.isnan(c).any()) and np.all(c[0] >= person_floor) and np.all(c[1] >= obstacle_floor)
-                if ok:
-                    break
-            if attempt == 0:
-                step = _project(chain, scene, q, c_prev, step, person_floor)
-        else:
-            h *= 0.5
-            if h < FOLLOW_STEP_MIN:
-                raise ValueError("escape_path: stuck on the way to the stage pose")
-            continue
-        h = min(FOLLOW_STEP_MAX, h * 1.5)
-        q, c_prev = q_new, c
-        path.append(q.copy())
-    raise ValueError("escape_path: too many steps to the stage pose")
-
-
-def _project(chain, scene, q, c, step, person_floor):
-    """`step` bent so the person-clearance rows near their floors do not drop below them."""
-    g = _gradient(chain, scene, q)
-    near = [j for j in range(len(PARTS)) if c[0, j] + g[j] @ step < person_floor[j] + FOLLOW_SLACK_M]
-    for _ in range(6):
-        need = {j: max(0.0, person_floor[j] + FOLLOW_SLACK_M - c[0, j]) for j in near}
-        rows = [j for j in near if g[j] @ step < need[j]]
-        if not rows:
-            break
-        G = g[rows]
-        r = np.array([need[j] for j in rows])
-        step = step + G.T @ np.linalg.solve(G @ G.T + 1e-6 * np.eye(len(rows)), r - G @ step)
-    m = np.abs(step).max()
-    return step * min(1.0, FOLLOW_STEP_MAX / m) if m > 0 else step
-
-
 def _densify(waypoints, max_step):
     out = [waypoints[0]]
     for a, b in zip(waypoints[:-1], waypoints[1:]):
@@ -278,8 +208,8 @@ def _densify(waypoints, max_step):
 
 
 def escape_path(chain, scene, q_rest, q_stage, caps=DEFAULT_CAPS):
-    """Points [(t, q, dq), ...] from q_rest to q_stage: the climb out of the person, a minimum-jerk
-    blend to q_stage, one smooth zero-to-zero timing, retimed to the FREE caps. Continuous joints
+    """Points [(t, q, dq), ...] from q_rest to q_stage: the climb out of the person, the route to
+    q_stage, one zero-to-zero timing, retimed to the FREE caps. Continuous joints
     take the whole-turn equivalent of q_stage nearest q_rest, so the path ends on that (the same
     posture; callers who need the exact end values pass an already-unwrapped q_stage)."""
     q_rest = np.asarray(q_rest, dtype=float)
