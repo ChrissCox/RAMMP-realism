@@ -2,6 +2,7 @@
 the ones it asked for, and hook.run is never reached. With it true, hook.run is called once per
 goal and (until Task 13) its result is the original execute's. Each engine runs beside a FakeDriver."""
 
+import copy
 import itertools
 import json
 import threading
@@ -30,6 +31,8 @@ ACTION_WAIT_S = 60.0
 Q1 = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
 Q2 = [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
 KNOTS = [[0.3] * 7]
+START = [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
+SETTLE_S = 0.3
 ARM_GOALS = ("go_to_joint_config", "execute_joint_trajectory")
 
 
@@ -108,8 +111,20 @@ def env(ros):
 
 
 def sent(fake):
-    """Every goal the fake driver received, serialized, by action name."""
-    return {n: [serialize_message(g) for g in gs] for n, gs in fake.goals.items() if gs}
+    """Every goal the fake driver received, serialized, by action name. The sender id is the
+    engine's name, which differs between the two engines of the equality test."""
+    out = {}
+    for name, goals in fake.goals.items():
+        for goal in goals:
+            goal = copy.copy(goal)
+            goal.sender_id = ""
+            out.setdefault(name, []).append(serialize_message(goal))
+    return out
+
+
+def at_start(fake):
+    fake.set_joints(START)
+    time.sleep(SETTLE_S)  # the fake publishes state at 50 Hz
 
 
 def test_disabled_hook_leaves_goals_untouched(env, monkeypatch):
@@ -139,6 +154,7 @@ def test_disabled_hook_leaves_goals_untouched(env, monkeypatch):
 def test_disabled_goals_equal_an_uninstalled_engine(env):
     """The same capability with and without install() sends byte-identical goals."""
     plain = env.make(make_capability())
+    at_start(env.fake)
     assert env.run(plain).result.status == Result.STATUS_SUCCESS
     baseline = sent(env.fake)
     assert baseline
@@ -146,6 +162,7 @@ def test_disabled_goals_equal_an_uninstalled_engine(env):
     env.fake.goals.clear()
 
     hooked = env.make(hook.install(make_capability()))
+    at_start(env.fake)
     assert env.run(hooked).result.status == Result.STATUS_SUCCESS
     assert sent(env.fake) == baseline
 
