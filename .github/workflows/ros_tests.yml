@@ -1,0 +1,27 @@
+name: ros-tests
+on:
+  push:
+    branches: ["feature/**"]
+  pull_request:
+    paths:
+      - "puppy_playground/**"
+      - "puppy_motion/**"
+      - "docker/ros-test.Dockerfile"
+      - ".github/workflows/ros_tests.yml"
+jobs:
+  pytest:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/ros-test.Dockerfile
+          load: true
+          tags: puppy-ros-test:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: pytest puppy_playground
+        run: docker run --rm -v "$PWD":/repo puppy-ros-test:ci pytest puppy_playground/test -q
