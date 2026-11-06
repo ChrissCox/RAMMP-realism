@@ -266,3 +266,16 @@ def test_a_beat_that_starts_away_from_the_measured_posture_is_skipped(stage_q, c
         )
     assert e.value.error_code == "start_mismatch" and e.value.recoverable
     assert not arm.sent and log and log[0]["ok"] is False
+
+
+def test_express_plays_when_the_driver_reports_continuous_joints_wrapped(env, stage_q, chain):
+    wrapped = stage_q.copy()
+    for j in (0, 2, 4, 6):
+        wrapped[j] = (stage_q[j] + np.pi) % (2 * np.pi) - np.pi
+    assert np.abs(wrapped - stage_q).max() > 1.0  # stage_pose.json is on another turn
+    env.at(wrapped)
+    res = env.run("express", {"name": "head_tilt", "size": 0.25})
+    assert res.status == Result.STATUS_SUCCESS, res.error_code
+    assert len(goals(env)) == 1
+    first = np.array(goals(env)[0].trajectory.points[0].positions)
+    assert np.allclose(first, wrapped, atol=1e-9)  # the beat was shifted to the reading's turn

@@ -83,7 +83,7 @@ class BeatSource:
     def beat(self, name, size, q, held, seed=EXPRESS_SEED):
         """The beat for `name` at the measured q: the cached stage beat when q is at the stage pose
         (to the pipeline's start tolerance), else composed live at q."""
-        if np.abs(q - self.stage_q).max() < pipeline.START_TOL_RAD:
+        if np.abs(pipeline.shortest_delta(self.chain, q, self.stage_q)).max() < pipeline.START_TOL_RAD:
             key = ("stage", name, size, bool(held), seed)
             with self._lock:
                 if key not in self._cache:
@@ -113,9 +113,9 @@ def _setup(engine):
     return chain, chair_scene(), engine._stage_q(chain)
 
 
-def _require_stage(engine, stage_q):
+def _require_stage(engine, chain, stage_q):
     q = engine._still_q()
-    if np.abs(q - stage_q).max() > AT_STAGE_RAD:
+    if np.abs(pipeline.shortest_delta(chain, q, stage_q)).max() > AT_STAGE_RAD:
         raise EngineError("not_at_stage", "the arm is not at the stage pose", recoverable=True)
 
 
@@ -150,7 +150,7 @@ def _play_names(engine, ctx, rec, names, size):
     for i, name in enumerate(names):
         if i:
             ctx.checkpoint()
-        _require_stage(engine, stage_q)
+        _require_stage(engine, chain, stage_q)
         pipeline.play(
             engine.arm, ctx, chain, scene, lambda q, h, n=name: source.beat(n, size, q, h),
             watch.held(), log=rec["motions"].append, name=name,
