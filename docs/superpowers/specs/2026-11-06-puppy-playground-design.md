@@ -51,9 +51,15 @@ expressions, the way a dog behaves when nobody is asking anything of it.
 - **The rest pose is inside the zone.** flatbot's rest pose sits 25 mm inside the occupant's torso box
   and 5 mm inside the backrest (`planner.yaml`'s own note). The chair layers therefore refuse plans
   that start from rest.
-- **The planner profile.** Moving out of rest needs `flatbot_empty_world`, whose planner has no
-  collision volumes. That profile is rammp-deployments PR #150, still open on 2026-11-06. It is for
+- **The planner profile.** Planning a path out of rest needs `flatbot_empty_world`, whose planner has
+  no collision volumes. That profile is rammp-deployments PR #150, still open on 2026-11-06, and is for
   attended use only.
+  - It is used for one thing only: the one-time, plan-only `plan_stage` run.
+  - Everything else, tasks included, runs under the normal `flatbot` profile with the chair layers.
+    The playground never asks the planner for anything after that: it replays its stored stage path
+    and sends its expressions with `execute_joint_trajectory`, which goes to the driver without
+    planning. *Assumption, checked in mock mode first:* the driver accepts those goals under the
+    normal profile.
 - **RAMMP rules.**
   - `self.arm` works only inside `execute()`.
   - Never call `/acquire_control`, `/release_control` or `/revoke_control`, and never publish
@@ -117,10 +123,10 @@ container holds two nodes:
 | `rest` | — | Plays the stage path backwards (the same checked path) |
 | `express` | `name`, `size` 0.25–1.0 | One expression at the stage pose |
 | `combo` | `names` (list), `size` | Expressions back to back, each checked |
-| `auto` | `size`, `seed`, `max_minutes` (default 10) | Auto mode until cancelled or timed out |
+| `auto` | `size`, `seed` | Auto mode until it is turned off; it yields to any task (below) |
 
-`express`, `combo` and `auto` refuse unless the measured posture is within 0.02 rad of the stage pose
-and every joint is slower than 0.02 rad/s.
+`express` and `combo` refuse unless the measured posture is within 0.02 rad of the stage pose and every
+joint is slower than 0.02 rad/s. `auto` plays wherever the arm is idle (below).
 
 ### The stage pose *(call)*
 
@@ -171,9 +177,10 @@ The stage path is planned once, approved, and stored *(call)*.
   - on the stored stage path, it rejoins the path at the nearest sample and continues back toward the
     rest pose, checked by the stage-path rules;
   - anywhere else it refuses, and the page says to recover by hand under the e-stop.
-- **Soft stop in auto mode.** Pressing an expression button while auto mode runs pauses it at the next
-  boundary between beats (Control PAUSE), so the arm is still at the stage pose. The UI then cancels
-  auto mode and sends the expression. Stop stays a hard cancel.
+- **Expression buttons while auto mode is on.** The engine runs one goal at a time, so the running
+  `auto` action takes requests itself. The UI publishes the expression name on `~/request`, and the
+  action subscribes to it with `create_action_subscription`. The action plays the request at the next
+  boundary between beats, with the arm still, then carries on in auto mode. Stop stays a hard cancel.
 
 ### Expressions *(call)*
 
@@ -216,11 +223,35 @@ How it behaves:
 
 - Transitions are weighted by mood, and calm is the hub. Pauses between behaviors are 1–6 s.
 - Everything is seeded, so a session can be replayed.
-- Pressing any expression button cancels auto mode and plays that expression.
-- Stop cancels.
-- `max_minutes` ends the session.
 - Each behavior goes through the same pipeline as a button. A behavior that fails its checks is
   skipped and logged, and auto mode carries on.
+
+**When it runs (user decision).** Auto mode is a toggle with no time limit. Once on, it plays whenever
+the arm isn't doing anything, and stops when it is turned off or a task starts.
+
+- **Idle** means *(call)*:
+  - no other RAMMP engine reports `executing` on its `~/status` topic (the playground watches every
+    engine's status);
+  - every joint has been slower than 0.02 rad/s for 3 s;
+  - the arm is not e-stopped and no stream is open.
+- **A task starts.** As soon as any other engine reports `executing`, the playground cancels the beat
+  in progress, so the arm holds where it is. It then commands nothing until every engine is idle
+  again. If the task's first command reaches the driver first, the driver's arbitration takes control
+  from the playground (`ControlTaken`), and the playground treats that the same way. A beat is at
+  most a few seconds and always starts and ends still, so the task starts from a still arm.
+- **Where it plays** *(call)*. Auto mode plays at whatever pose the arm is resting in. It never
+  travels anywhere by itself; going to the stage pose stays a button.
+  - At the stage pose the expressions get their full size.
+  - At the rest pose the checks keep them small and pointed away from the chair, because rest already
+    sits inside the occupant boxes. There it is a quiet, breathing, glancing kind of alive.
+  - After a task, it plays wherever the task left the arm, if the checks allow.
+- **Holding something** *(call)*. If `/gripper_state` reads neither open (< 0.05) nor fully closed
+  (> 0.93), the gripper is treated as holding an object. The proud and look behaviors then run in
+  their muted, level versions, with no wag.
+- **The page.** The Auto toggle shows *idle and playing*, *waiting for a task to finish*, or *off*.
+  Pressing an expression button while auto mode is playing pauses it at the next beat boundary, plays
+  the expression, then hands back to auto mode. Stop cancels the current beat; auto mode stays on
+  until it is toggled off.
 
 ### The web page
 
