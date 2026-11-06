@@ -7,3 +7,4 @@ imageio>=2.34
 imageio-ffmpeg>=0.5
 pytest>=8.0
 pyyaml>=6.0
+-e ../puppy_motion

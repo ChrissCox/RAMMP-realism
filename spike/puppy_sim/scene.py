@@ -176,6 +176,52 @@ def _material(spec, name, rgba, specular=0.3, shininess=0.4, reflectance=0.0):
     return name
 
 
+# ---- motion kinematics: puppy_motion's Chain and clearance geometry (MuJoCo stays the renderer)
+@lru_cache(maxsize=4)
+def motion_chain(run_name=REFERENCE_RUN):
+    """puppy_motion's Chain of the run's own URDF: the kinematics every motion decision uses."""
+    from puppy_motion.urdf import Chain
+
+    return Chain.from_urdf(runs.load_run(run_name).urdf)
+
+
+@lru_cache(maxsize=1)
+def person_scene():
+    """The mannequin above as puppy_motion's geometry Scene (data/spike_person.json)."""
+    from puppy_motion.geometry import Scene as PmScene
+
+    return PmScene.from_param((SPIKE_DIR / "data" / "spike_person.json").read_text())
+
+
+class MotionKin:
+    """The few Kin methods the runs and the camera use (fk, fk_track, clearance_track), computed by
+    puppy_motion's Chain and geometry instead of MuJoCo."""
+
+    def __init__(self, chain=None, person=None):
+        self.chain = chain or motion_chain()
+        self.person = person or person_scene()
+
+    def fk(self, q, site="ee"):
+        return self.chain.fk(q, site)
+
+    def fk_track(self, q, site="ee"):
+        """(positions (N, 3), rotations (N, 3, 3))."""
+        out = [self.chain.fk(qi, site) for qi in np.asarray(q, dtype=float)]
+        return np.array([p for p, _ in out]), np.array([R for _, R in out])
+
+    def clearance_track(self, track):
+        """(N, 2, 4) clearances (row 0 person, row 1 obstacles; kin.ARM_PARTS columns) along a track."""
+        from puppy_motion.geometry import clearances_batch
+
+        out = np.empty((track.n, 2, len(kin.ARM_PARTS)))
+        held = np.asarray(track.held, dtype=bool)
+        for flag in (False, True):
+            rows = held == flag
+            if rows.any():
+                out[rows] = clearances_batch(self.chain, self.person, np.asarray(track.q)[rows], flag)
+        return out
+
+
 def _geom(body, kind, size, pos=(0, 0, 0), quat=(1, 0, 0, 0), material="", group=1, name="", fromto=None):
     """A visual geom (no contacts: the model is never stepped)."""
     g = body.add_geom(type=kind, size=size, pos=pos, quat=quat, group=group, contype=0, conaffinity=0)

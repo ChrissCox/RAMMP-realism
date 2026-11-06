@@ -73,6 +73,7 @@ class Run:
     ee_t: np.ndarray
     ee_pos: np.ndarray
     ee_quat: np.ndarray
+    urdf: str = ""  # the robot's URDF as the bag recorded it (puppy_motion.urdf.Chain.from_urdf)
 
 
 def _goal_key(goal_id):
@@ -120,6 +121,7 @@ def load_run(name):
         ee_t=np.array([e[0] for e in ee], dtype=float),
         ee_pos=np.array([[e[1]["pose"]["position"][k] for k in "xyz"] for e in ee]),
         ee_quat=np.array([[e[1]["pose"]["orientation"][k] for k in "xyzw"] for e in ee]),
+        urdf=raw["urdf"],
     )
 
 

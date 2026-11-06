@@ -200,6 +200,48 @@ def _gripper_check(track):
     return Check("gripper", same, "ok" if same else "MOVED")
 
 
+def replay_checks(plain, puppy):
+    """The checks of a replay.direct_run track against the plain track it came from: every spliced
+    beat passes puppy_motion.validate.check_beat at the posture it was given (what the hook would
+    send), sits in the track as composed, the PRECISION samples play exactly as recorded, the rest
+    of the path is the plain path at tau, and the beats' time is within the preset's budget."""
+    from puppy_motion.validate import check_beat
+
+    chain, person = scene.motion_chain(plain.name), scene.person_scene()
+    found = []
+    for sp in puppy.spliced:
+        b = sp.beat
+        bad = check_beat(b.points, sp.q_now, chain, person, b.zone, puppy.caps or "default", held=sp.held)
+        found += [f"{b.name} at {sp.i0 * DT:.2f} s: {v.rule}: {v.detail}" for v in bad]
+    out = [Check("beats", not found, f"{len(puppy.spliced) - len(found)}/{len(puppy.spliced)} valid", "; ".join(found))]
+    in_track = all(
+        np.array_equal(puppy.q[sp.i0 : sp.i0 + len(sp.beat.points)], np.array([p[1] for p in sp.beat.points]))
+        for sp in puppy.spliced
+    )
+    out.append(Check("splice", in_track, "as composed" if in_track else "ALTERED"))
+    u = puppy.tau / DT
+    on_path = interp_rows(plain.q, u)
+    beat_span = np.zeros(puppy.n, dtype=bool)
+    for sp in puppy.spliced:
+        beat_span[sp.i0 : sp.i0 + len(sp.beat.points)] = True
+    prec = puppy.zone == PRECISION
+    whole = np.abs(u - np.round(u)) < SAMPLE_SNAP
+    exact = bool(np.array_equal(puppy.q[prec & whole], plain.q[np.round(u[prec & whole]).astype(int)]))
+    lo, hi = np.floor(u + SAMPLE_SNAP).astype(int), np.ceil(u - SAMPLE_SNAP).astype(int)
+    hi = np.clip(hi, 0, plain.n - 1)
+    played = bool(np.all(puppy.zone[(plain.zone[lo] == PRECISION) | (plain.zone[hi] == PRECISION)] == PRECISION))
+    ok = exact and played and not (prec & beat_span).any() and bool(np.abs(puppy.q - on_path)[prec].max(initial=0.0) <= PATH_TOL_RAD)
+    out.append(Check("precision", ok, "same" if ok else "DIFF", "" if ok else f"exact {exact}, precise samples kept {played}"))
+    off = float(np.abs(puppy.q - on_path)[~beat_span].max())
+    out.append(Check("path", off <= PATH_TOL_RAD, "same" if off <= PATH_TOL_RAD else "OFF", f"{off:.1e} rad off the plain path"))
+    beat_s = sum(sp.beat.duration for sp in puppy.spliced)
+    limit = puppy.budget.seconds if puppy.budget is not None else float("inf")
+    out.append(
+        Check("beat s", beat_s <= limit + DT + CAP_TOL, f"{beat_s:.1f}/{limit:.1f} {puppy.budget.name}", f"+{puppy.duration - plain.duration:.1f} s in all")
+    )
+    return out
+
+
 def passed(checks):
     return all(c.ok for c in checks)
 
@@ -245,7 +287,9 @@ def check_named(name):
     labels = ("plain", "puppy") if len(tracks) == 2 else ("puppy" if tracks[0].func is not None else "plain",)
     rows = []
     for label, t in zip(labels, tracks):
-        if t.commanded is None:
+        if t.spliced is not None:  # a puppy_motion replay: its own checks
+            rows.append((name, label, t.duration, [*check_track(t, kin), *replay_checks(tracks[0], t)], t.log))
+        elif t.commanded is None:
             rows.append((name, label, t.duration, check_track(t, kin), t.log))
         else:  # an achieved track (dynamics.achieved): the checks hold its command
             cmd = t.commanded

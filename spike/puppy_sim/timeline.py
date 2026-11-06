@@ -72,6 +72,7 @@ class Track:
     tier: str = ""
     commanded: "Track | None" = None
     control: str = ""
+    spliced: "list | None" = None  # replay.direct_run: [Spliced], the puppy_motion beats played into this track
 
     @property
     def n(self):
