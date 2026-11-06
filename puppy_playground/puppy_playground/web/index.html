@@ -8,6 +8,8 @@
 <p>Size <input id="size" type="range" min="0.25" max="1" step="0.05" value="0.25"> <span id="sizev">0.25</span></p>
 <p><button id="stage">Stage</button> <button id="rest">Rest</button> <button id="recover">Recover</button>
 <label><input id="auto" type="checkbox"> Auto</label></p>
+<p style="border:2px dashed #888;padding:0.5em;margin-top:1.5em">Planning only, the arm does not move:
+<button id="plan_stage">Plan stage (no motion)</button> <span id="planres"></span></p>
 <h4>Expressions</h4>
 <div id="expr">
 <button data-expr="breathe">breathe</button>
@@ -45,7 +47,7 @@ function post(path, body) {
   });
 }
 $("size").oninput = function () { $("sizev").textContent = size(); };
-["stage", "rest", "recover", "stop"].forEach(function (n) { $(n).onclick = function () { post("/" + n); }; });
+["stage", "rest", "recover", "stop", "plan_stage"].forEach(function (n) { $(n).onclick = function () { post("/" + n); }; });
 $("auto").onchange = function () { post("/auto", {on: $("auto").checked, size: size()}); };
 document.querySelectorAll("[data-expr]").forEach(function (b) {
   b.onclick = function () {
@@ -56,13 +58,34 @@ document.querySelectorAll("[data-expr]").forEach(function (b) {
 });
 $("runcombo").onclick = function () { post("/combo", {names: combo, size: size()}); };
 $("clearcombo").onclick = function () { combo = []; $("combo").textContent = ""; };
+var HINTS = {
+  drifted: "press Recover",
+  contact: "check the arm, then press Recover",
+  control_taken: "another controller has the arm",
+  estopped: "release the e-stop, then turn auto on again"
+};
+function hint(code) { return HINTS[code] || ""; }
 function poll() {
   fetch("/status").then(function (r) { return r.json(); }).then(function (s) {
-    var t = "state: " + s.state + (s.busy ? " (busy)" : "") + " | mood: " + s.mood + " | auto: " + s.auto + (s.estopped ? " | E-STOPPED" : "");
-    if (s.last_refusal) t += " | last refusal: " + s.last_refusal.action + " " + s.last_refusal.error_code + " " + s.last_refusal.message;
-    if (s.off_reason && s.auto == "off") t += " | auto turned off: " + s.off_reason + (s.off_reason == "estopped" ? "" : " — press Stage (or Rest)");
+    var t = "state: " + s.state + (s.action ? " (" + s.action + ")" : "") + (s.busy ? " (busy)" : "") + " | mood: " + (s.mood || "-") + " | auto: " + s.auto + (s.estopped ? " | E-STOPPED" : "");
+    var r = s.last_refusal;
+    if (r) {
+      t += " | last refusal: " + r.action + " " + r.error_code + (r.message ? " - " + r.message : "");
+      if (hint(r.error_code)) t += " (" + hint(r.error_code) + ")";
+    }
+    if (s.off_reason && s.auto == "off") {
+      t += " | auto turned off: " + s.off_reason;
+      t += hint(s.off_reason) ? " - " + hint(s.off_reason) : (r ? " - " + r.error_code + (r.message ? ": " + r.message : "") : "");
+    }
     $("status").textContent = t;
     $("auto").checked = s.auto != "off";
+    var d = s.last_done, pr = "";
+    if (d && d.action == "plan_stage") {
+      if (d.result == "ok") pr = "candidate written (stage_path.candidate.json)";
+      else if (d.result == "refused" && r) pr = (r.error_code == "no_candidate" ? "no_candidate: " : "refused " + r.error_code + ": ") + (r.message || "");
+      else pr = d.result;
+    }
+    $("planres").textContent = pr;
   }).catch(function () { $("status").textContent = "no connection"; });
 }
 setInterval(poll, 1000); poll();

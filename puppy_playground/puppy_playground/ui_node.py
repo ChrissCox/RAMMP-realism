@@ -25,7 +25,20 @@ SIZE_MIN, SIZE_MAX, SIZE_DEFAULT = 0.25, 1.0, 0.25
 SIMPLE = ("stage", "rest", "recover", "plan_stage")
 WEB_DIR = Path(__file__).resolve().parent / "web"
 CANCEL_RESEND_S = 0.3  # re-send cancel while an auto goal that should have stopped still runs
-STOP_WEDGE_S = 5.0  # after /stop, a goal with no result by then is forgotten
+STOP_WEDGE_S = 5.0  # after /stop, a goal with no result is forgotten only once the engine reports idle
+
+
+def parse_payload(payload_json):
+    """A failed Result's payload_json is {"action", "error_code", "message"}. -> (error_code, message);
+    an empty or non-JSON payload falls back to the raw text as the message."""
+    text = payload_json or ""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return "", text
+    if not isinstance(data, dict):
+        return "", text
+    return str(data.get("error_code") or ""), str(data.get("message") or "")
 
 ARM_JOINTS = tuple(f"arm_joint_{i}" for i in range(1, 8))  # the gripper joint is not an arm joint
 STILL_RATE = 0.02  # rad/s: every arm joint slower than this counts as still
@@ -73,8 +86,10 @@ class UiController:
         self._engine_heard = None
         self._estopped = True  # until /control_status arrives
         self._refusal = None
+        self._last_done = None  # {"action", "result": ok|refused|cancelled} of the last finished goal
         self._last_cancel = -1e9
         self._stop_deadline = None
+        self._stopped_tokens = set()  # tokens /stop was pressed for (cancel them when the handle arrives)
 
     # -- inputs from ROS ------------------------------------------------------
 
@@ -114,15 +129,23 @@ class UiController:
             self._run([cmd] if cmd else [])
             if (
                 self._active is not None
-                and self._active[1] == "auto"
-                and self.sup.state is not State.PLAYING
+                and (
+                    (self._active[1] == "auto" and self.sup.state is not State.PLAYING)
+                    or self._active[0] in self._stopped_tokens
+                )
                 and now - self._last_cancel >= CANCEL_RESEND_S
                 and self._own_goal_may_run()
             ):
                 self._cancel()
             if self._stop_deadline is not None and now >= self._stop_deadline:
-                self._stop_deadline = None
-                self._active = None  # wedged: no result after /stop
+                # no result after /stop: forget the goal only once the engine says it is idle, so
+                # `busy` never reads false while the arm may still be moving
+                if self._active is None:
+                    self._stop_deadline = None
+                elif not self._own_goal_may_run():
+                    self._stop_deadline = None
+                    self._stopped_tokens.discard(self._active[0])
+                    self._active = None
 
     def goal_finished(self, token, ok, error_code="", message="", cancelled=False):
         with self.lock:
@@ -131,6 +154,8 @@ class UiController:
             kind = self._active[1]
             self._active = None
             self._stop_deadline = None
+            self._stopped_tokens.discard(token)
+            self._last_done = {"action": kind, "result": "ok" if ok else "cancelled" if cancelled else "refused"}
             if not ok and not cancelled:
                 self._refusal = {"action": kind, "error_code": error_code, "message": message}
             if kind == "auto":
@@ -142,8 +167,10 @@ class UiController:
         with self.lock:
             return {
                 "state": self._engine.get("state", "unknown"),
+                "action": self._engine.get("action", ""),
                 "mood": self._engine.get("mood", ""),
                 "last_refusal": self._refusal,
+                "last_done": self._last_done,
                 "auto": self.sup.state.value,
                 "off_reason": self.sup.off_reason,
                 "busy": self._active is not None,
@@ -156,6 +183,8 @@ class UiController:
             name = path.strip("/")
             if name == "stop":
                 self.sup.toggle(False)  # Stop also turns auto off
+                if self._active is not None:
+                    self._stopped_tokens.add(self._active[0])
                 ok = self._cancel()
                 self._stop_deadline = self.clock() + STOP_WEDGE_S
                 if not ok:
@@ -191,6 +220,11 @@ class UiController:
 
     # -- internals ------------------------------------------------------------
 
+    def stop_requested(self, token):
+        """True if /stop was pressed while this goal was in flight (its handle may arrive later)."""
+        with self.lock:
+            return token in self._stopped_tokens
+
     def _own_goal_may_run(self):
         """False only when the playground reported idle after the goal was sent."""
         idle = self._engine.get("state") == "idle"
@@ -216,6 +250,7 @@ class UiController:
         self._active = (self._token, kind)
         self._sent_at = self.clock()
         self._refusal = None
+        self._last_done = None
         self.backend.send_goal(self._token, kind, params)
 
     def _run(self, commands):
@@ -361,16 +396,22 @@ def main(args=None):
                 self.controller.goal_finished(token, False, "rejected", "goal rejected by the engine")
                 return
             self._handles[token] = handle
+            if self.controller.stop_requested(token):
+                handle.cancel_goal_async()  # /stop landed before the handle existed
             handle.get_result_async().add_done_callback(lambda f, t=token: self._result(t, f))
 
         def _result(self, token, future):
             self._handles.pop(token, None)
             r = future.result().result.result
-            message = getattr(r, "message", "") or getattr(r, "payload_json", "")
+            ok = r.status == Result.STATUS_SUCCESS
+            code, message = r.error_code, ""
+            if not ok:
+                payload_code, message = parse_payload(getattr(r, "payload_json", ""))
+                code = code or payload_code
             self.controller.goal_finished(
                 token,
-                r.status == Result.STATUS_SUCCESS,
-                r.error_code,
+                ok,
+                code,
                 message,
                 cancelled=r.status == Result.STATUS_CANCELLED,
             )

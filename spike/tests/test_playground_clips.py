@@ -107,6 +107,11 @@ def test_candidate_file_renders_for_approval(tmp_path):
     clip = ps.make_clip(_candidate_file(tmp_path))
     assert "REVIEW FOR APPROVAL" in clip.title and "escape" in clip.title and "NOT APPROVABLE" not in clip.title
     assert clip.candidate.violations == []
+    import hashlib
+
+    sha = hashlib.sha256(_candidate_file(tmp_path).read_bytes()).hexdigest()
+    assert sha[:12] in clip.title and len(clip.candidate.sha256) == 64
+    assert clip.name == "playground_stage_candidate"  # not the committed clip's output name
     track = clip.build()
     assert track.log[-1].startswith("path by candidate file")
     assert "NOT APPROVABLE" not in " ".join(clip.subtitle_for([track]))

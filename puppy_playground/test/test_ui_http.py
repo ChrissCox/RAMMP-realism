@@ -297,13 +297,68 @@ def test_stop_reports_failure_when_control_is_unavailable(ui):
     assert ui.backend.goal_cancels == [1]  # the goal handle was still cancelled
 
 
-def test_stop_clears_a_wedged_goal_after_five_seconds(ui):
+def test_stop_does_not_forget_a_goal_the_engine_still_runs(ui):
     ui.post("/stage")
     ui.post("/stop")
-    ui.advance(4.0)
+    ui.ctl.engine_status("puppy_playground", "executing", {"state": "executing"})
+    ui.advance(30.0)
+    assert json.loads(ui.get("/status")[1])["busy"] is True
     assert ui.post("/rest")[0] == 409
-    ui.advance(1.5)
+    assert len(ui.backend.goal_cancels) > 1  # the cancel is re-sent while it runs
+
+
+def test_stop_releases_the_goal_once_the_engine_reports_idle(ui):
+    ui.post("/stage")
+    ui.post("/stop")
+    for _ in range(7):  # the engine publishes its status at 1 Hz
+        ui.advance(1.0)
+        ui.ctl.engine_status("puppy_playground", "idle", {"state": "idle"})
     assert ui.post("/rest")[0] == 200
+
+
+def test_stop_before_the_handle_exists_is_remembered(ui):
+    ui.post("/stage")
+    token = ui.backend.goals[-1][0]
+    assert ui.ctl.stop_requested(token) is False
+    ui.post("/stop")
+    assert ui.ctl.stop_requested(token) is True  # ui_node._accepted cancels the handle on arrival
+    ui.finish(False, "", "", cancelled=True)
+    assert ui.ctl.stop_requested(token) is False
+
+
+def test_payload_json_is_parsed_and_tolerates_junk():
+    from puppy_playground.ui_node import parse_payload
+
+    p = json.dumps({"action": "stage", "error_code": "check_failed", "message": "floor: 3 mm"})
+    assert parse_payload(p) == ("check_failed", "floor: 3 mm")
+    assert parse_payload("") == ("", "")
+    assert parse_payload("not json") == ("", "not json")
+    assert parse_payload("[1, 2]") == ("", "[1, 2]")
+    assert parse_payload('{"message": 5}') == ("", "5")
+
+
+def test_status_carries_the_action_and_a_plan_stage_result(ui):
+    ui.ctl.engine_status("puppy_playground", "executing", {"state": "executing", "action": "express", "mood": "playful"})
+    status = json.loads(ui.get("/status")[1])
+    assert (status["action"], status["mood"]) == ("express", "playful")
+    ui.post("/plan_stage")
+    ui.finish()
+    assert json.loads(ui.get("/status")[1])["last_done"] == {"action": "plan_stage", "result": "ok"}
+    ui.post("/plan_stage")
+    ui.finish(False, "no_candidate", "tried escape, min_jerk")
+    status = json.loads(ui.get("/status")[1])
+    assert status["last_done"]["result"] == "refused"
+    assert status["last_refusal"]["error_code"] == "no_candidate"
+
+
+def test_page_has_a_separate_plan_stage_button_and_the_hints(ui):
+    html = ui.get("/")[1].decode()
+    assert 'id="plan_stage"' in html and "Plan stage (no motion)" in html
+    assert html.index("Plan stage (no motion)") > html.index('id="auto"')  # apart from the motion buttons
+    for hint in ("press Recover", "check the arm, then press Recover", "another controller has the arm",
+                 "release the e-stop, then turn auto on again"):
+        assert hint in html
+    assert "press Stage (or Rest)" not in html
 
 
 def test_status_json(ui):

@@ -3,7 +3,8 @@
 Rest, then the path (escape.escape_path: climb out of the occupant keep-out, blend to the stage
 pose, retimed to the FREE caps), a hold at the stage pose, and the same path back. With
 PLAYGROUND_CANDIDATE=<stage_path.candidate.json> it plays that file (what plan_stage wrote) instead,
-titled REVIEW FOR APPROVAL or NOT APPROVABLE. Nothing here moves a robot.
+titled with the file's sha256 (first 12 hex) and REVIEW FOR APPROVAL or NOT APPROVABLE, as the clip
+playground_stage_candidate (media/playground_stage_candidate.*; the committed clip is untouched). Nothing here moves a robot.
 
 `python -m puppy_sim.clips.playground_stage` writes media/playground_stage_pose.png (the still) and
 puppy_playground/puppy_playground/data/stage_pose.json."""
@@ -37,6 +38,7 @@ HOLD_S = 2.5
 STILL_PATH = render.MEDIA_DIR / "playground_stage_pose.png"
 CHIP_PATH = "SIMULATED PLAN, NOT APPROVED"
 CHIP_CANDIDATE = "ROBOT CANDIDATE PATH"
+CANDIDATE_CLIP = "playground_stage_candidate"  # output stem (media/playground_stage_candidate.*) when PLAYGROUND_CANDIDATE is set
 
 
 def plan():
@@ -84,7 +86,7 @@ def candidate_title(c):
     if c.error:
         return "Stage path candidate: UNREADABLE - NOT APPROVABLE"
     verdict = "REVIEW FOR APPROVAL" if c.approvable else "NOT APPROVABLE"
-    return f"Stage path candidate: {c.method}, {c.duration:.1f} s - {verdict}"
+    return f"Stage path candidate {c.sha256[:12]}: {c.method}, {c.duration:.1f} s - {verdict}"
 
 
 def candidate_subtitle(c):
@@ -118,7 +120,7 @@ def make_clip(candidate_path=None):
     """The clip for the simulated plan, or for the candidate file at candidate_path."""
     cand = load_candidate(candidate_path) if candidate_path else None
     return StageClip(
-        name="playground_stage",
+        name=CANDIDATE_CLIP if cand else "playground_stage",  # a candidate never overwrites the committed clip
         title=candidate_title(cand) if cand else "Playground stage pose and candidate path",
         subtitle="",
         camera="playground_wide",

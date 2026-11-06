@@ -111,7 +111,7 @@ idle() { # wait for the goal to end (up to 120 s: the first path check takes 5-2
   return 1
 }
 mock_goals() { logs | grep -c 'execute_joint_trajectory: mock: not sent' || true; }
-accepted_and_built() { # name, path, json: 200, finishes with no refusal, and a goal reached the mock arm
+accepted_and_built() { # name, path, json: 200, finishes with no refusal, and a checked trajectory reached the arm interface
   local name="$1" path="$2" body="${3:-}" before after
   before="$(mock_goals)"
   check "$name" "200" POST "$path" "$body"
@@ -119,8 +119,8 @@ accepted_and_built() { # name, path, json: 200, finishes with no refusal, and a 
   if grep -q '"last_refusal": null' <<<"$(curl -s --max-time 5 "$BASE/status")"; then pass "$name: no refusal"
   else fail "$name was refused: $(curl -s --max-time 5 "$BASE/status")"; fi
   after="$(mock_goals)"
-  if [ "$after" -gt "$before" ]; then pass "$name: a driver goal was built and handed to the mock arm ($before -> $after)"
-  else fail "$name: no goal reached the mock arm"; fi
+  if [ "$after" -gt "$before" ]; then pass "$name: the checked trajectory reached the arm interface (execute_joint_trajectory, mock: not sent) ($before -> $after)"
+  else fail "$name: no trajectory reached the arm interface"; fi
 }
 
 refused_with() { # name, path, json, error_code: 200, then refused with that code and no new goal
@@ -132,7 +132,7 @@ refused_with() { # name, path, json, error_code: 200, then refused with that cod
   if grep -q "\"error_code\": \"$want\"" <<<"$st"; then pass "$name: refused $want"
   else fail "$name: wanted refusal $want, got: $st"; fi
   after="$(mock_goals)"
-  if [ "$after" -eq "$before" ]; then pass "$name: no goal sent"; else fail "$name: a goal was sent ($before -> $after)"; fi
+  if [ "$after" -eq "$before" ]; then pass "$name: no trajectory sent"; else fail "$name: a trajectory was sent ($before -> $after)"; fi
 }
 
 check "page"      "200" GET /
@@ -143,7 +143,7 @@ code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST -d 'name=no
 check "express (bad name)"  "400" POST /express '{"name":"no_such_thing"}'
 check "combo (bad)"         "400" POST /combo   '{"names":[]}'
 
-# the mock arm starts at the rest pose with an approved path: these build real goals
+# the mock arm starts at the rest pose with an approved path: these send checked trajectories to the arm interface (mock mode returns before any ROS goal is built)
 accepted_and_built "stage"   /stage
 accepted_and_built "express" /express '{"name":"head_tilt","size":0.25}'
 # no /gripper_state on the isolated domain: a stale gripper counts as holding (fail-safe), so the
@@ -160,7 +160,7 @@ check "stop (again)"         "200 503" POST /stop
 check "status (last)"        "200" GET /status
 
 echo "--- /status:"; curl -s --max-time 10 "$BASE/status"; echo
-echo "--- mock goals handed to the mock arm: $(mock_goals)"
+echo "--- trajectories that reached the arm interface (mock, not sent): $(mock_goals)"
 echo "--- request log lines: $(wc -l < "$TMP/playground.jsonl" 2>/dev/null || echo 0)"
 if [ "$FAILS" -eq 0 ]; then echo "ALL PASS"; else echo "$FAILS FAILED"; fi
 exit "$FAILS"

@@ -79,10 +79,12 @@ requests once it has checked the container it started. In mock mode (capability_
 `MOCK_*`) the arm interface makes no ROS entity at all: a motion logs `execute_joint_trajectory: mock:
 not sent`, succeeds and becomes the mock state, which starts at the rest pose here. The script
 prints one PASS/FAIL line per endpoint and shows, from the container's log, that Stage, an
-expression, a combo and Rest each built a driver goal that went to the mock arm.
+expression, a combo and Rest each sent a checked trajectory to the arm interface's
+`execute_joint_trajectory`.
 
-Expect `ALL PASS` and exit status 0. This shows the goals are built and logged; the driver accepting
-a real goal is only checked at step 6.1. A failure prints the reason; do not go on until it passes.
+Expect `ALL PASS` and exit status 0. This shows each action reached `execute_joint_trajectory` with a
+checked trajectory; mock mode returns there, before any ROS goal is built. Building the goal is covered
+by the CI FakeDriver tests, and the driver accepting a real goal is only checked at step 6.1. A failure prints the reason; do not go on until it passes.
 
 ## 4. Plan the stage path (no motion; `plan_only`)
 
@@ -99,9 +101,11 @@ docker run --rm --network host --ipc host --env-file ~/puppy-env.list -v ~/puppy
 ```
 
 Attended: hand on the e-stop, nobody in the chair, the arm at rest. Open `http://<snorlax>:8080/` and
-press **only Plan stage**. Press nothing else: with `plan_only` the engine refuses every other action,
-but do not rely on that. (Or `curl -s -X POST -H 'Content-Type: application/json' -d '{}'
-http://<snorlax>:8080/plan_stage`, then `curl -s http://<snorlax>:8080/status`.)
+press **only "Plan stage (no motion)"**, the button set apart from the motion buttons. Press nothing
+else: with `plan_only` the engine refuses every other action, but do not rely on that. The line beside
+the button says "candidate written" or shows why none was (`no_candidate` and its message). (Or, on
+snorlax: `curl -s -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8080/plan_stage`,
+then `curl -s http://127.0.0.1:8080/status`.)
 
 It writes `~/puppy-data/stage_path.candidate.json` and never moves the arm. Stop the container
 (Ctrl-C), then switch back:
@@ -113,19 +117,30 @@ sheppy up flatbot
 ## 5. Review the candidate in the simulator, then approve it
 
 On your PC, copy the candidate from snorlax (the data dir is `~/puppy-data`) and render exactly that
-file:
+file. Git Bash:
 
 ```
 scp snorlax@10.5.127.121:puppy-data/stage_path.candidate.json C:/Users/CHC785/orca/projects/RAMMP-realism/spike/media/stage_path.candidate.json
 cd C:/Users/CHC785/orca/projects/RAMMP-realism/spike
-PLAYGROUND_CANDIDATE=media/stage_path.candidate.json .venv/Scripts/python -m puppy_sim render playground_stage
+PLAYGROUND_CANDIDATE=media/stage_path.candidate.json .venv/Scripts/python -m puppy_sim render playground_stage_candidate
 ```
+
+PowerShell (same scp and cd):
+
+```
+$env:PLAYGROUND_CANDIDATE="media/stage_path.candidate.json"; .venv/Scripts/python -m puppy_sim render playground_stage_candidate
+```
+
+The candidate renders to `media/playground_stage_candidate.*`; the committed `playground_stage` clip is
+not overwritten.
 
 The clip plays the candidate file's own points, forward to the stage pose and back, on flatbot's chair
 boxes, and re-checks it with the engine's rules (chair scene grown by the file's margin). Approve ONLY
-if the title reads "Stage path candidate: <method>, <seconds> s - REVIEW FOR APPROVAL" and no
-violations are listed. A title with "NOT APPROVABLE" (violations, or a file that cannot be read) means
-do not approve. Without `PLAYGROUND_CANDIDATE` the clip shows the simulated plan, labelled "not the
+if the title reads "Stage path candidate <12 hex>: <method>, <seconds> s - REVIEW FOR APPROVAL" and no
+violations are listed. The 12 hex digits are the first 12 of the candidate file's sha256: before the `cp`
+below, run `sha256sum ~/puppy-data/stage_path.candidate.json` on snorlax and check that it starts with
+the same 12 digits. If it does not, the file you reviewed is not the file you would approve. A title with "NOT APPROVABLE" (violations, or a file that cannot be read) means
+do not approve. Without `PLAYGROUND_CANDIDATE` the `playground_stage` clip shows the simulated plan, labelled "not the
 robot's candidate", which is not what the arm will replay.
 
 To approve, on snorlax:
@@ -152,7 +167,8 @@ Nobody in the chair, you on the chair's right side by the joystick, hand on the 
 2. **Each expression once at size 0.25**, one at a time, watching the whole beat. Watch **wag**,
    **lock_on** and **bounce** most closely: the driver model predicts up to 31 mm of overshoot on these
    without acceleration feedforward. Stop at any beat that looks wrong.
-3. **Rest.** The arm goes back along the approved path in reverse.
+3. **Rest.** The arm goes back along the approved path in reverse. If Rest refuses `not_at_end`
+   (the arm sagged off the stage pose), press **Recover**, then Rest.
 
 Continuous joints read in (-pi, pi] from the driver. The engine compares and sends them modulo whole
 turns, so a joint that reads wrapped is not a fault.
@@ -160,7 +176,7 @@ turns, so a joint that reads wrapped is not a fault.
 ## 7. Full size
 
 Repeat the expressions at size 1.0 (the size slider), the same way: one each, hand on the e-stop,
-wag, lock_on and bounce first. Then **Rest** if the arm is still at stage. If the arm is at rest,
+wag, lock_on and bounce first. Then **Rest** if the arm is still at stage (if it refuses `not_at_end`, press Recover, then Rest). If the arm is at rest,
 press Stage again first.
 
 ## 8. Auto
@@ -170,15 +186,24 @@ of quiet and a still arm, before the first beat. Watch several beats.
 
 Then start a real task (for example from the orchestrator) while Auto is on. Confirm Auto yields
 within about half a second: the arm finishes nothing new and the page shows `waiting_for_task`. When
-the task is done and everything has been idle and still for 3 s, Auto resumes by itself.
+the task is done and everything has been idle and still for 3 s, Auto resumes by itself only if the
+task left the arm within 0.02 rad of the stage pose or of the stored rest. Otherwise (a task moved the
+arm elsewhere, or another controller took it) Auto turns itself off and the page says why
+(`drifted`: press Recover; `control_taken`: another controller has the arm). An e-stop also turns Auto
+off: release it and turn Auto on again.
 
 ## 9. Rest
 
 Turn Auto off, press **Rest**, confirm the arm is back at rest, then stop the container (Ctrl-C).
+If Rest refuses `not_at_end` after the arm sagged, press **Recover**, then Rest.
 
 ## If something goes wrong
 
 - Press the e-stop first. Then **Stop** on the page, which also turns Auto off.
 - Arm left off the path: press **Recover** (near the stage pose, or within 0.02 rad of a path sample).
-  Anywhere else it refuses and you recover by hand.
+  Anywhere else it refuses and you recover by hand. Recover from the middle of the path can take
+  minutes (it re-times the rest of the path from standstill): watch it, hand on the e-stop.
+- The status line names the action, the error code and the message of every refusal. Hints: `drifted`
+  press Recover; `contact` check the arm, then press Recover; `control_taken` another controller has
+  the arm; `estopped` release the e-stop, then turn Auto on again.
 - Log of every request and motion: `~/puppy-data/playground.jsonl`.

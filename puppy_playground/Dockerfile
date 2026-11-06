@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 # numpy 1.21.5, below puppy_motion's floor; unpinned, pip would pull numpy 2, which the base's
 # compiled packages do not support). /usr/local comes before the apt dist-packages on sys.path.
 COPY puppy_motion/ /tmp/puppy_motion/
-RUN python3 -m pip install --no-cache-dir --upgrade pip \
+RUN python3 -m pip install --no-cache-dir --upgrade "pip==24.3.1" \
     && python3 -m pip install --no-cache-dir numpy==1.26.4 scipy==1.14.0 /tmp/puppy_motion \
     && rm -rf /tmp/puppy_motion
 

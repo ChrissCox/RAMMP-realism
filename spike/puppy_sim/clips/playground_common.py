@@ -208,6 +208,7 @@ class Candidate:
     margin_m: float = 0.0
     violations: list = None
     error: str = ""
+    sha256: str = ""  # of the file's bytes, to compare with `sha256sum` before it is copied
 
     @property
     def approvable(self):
@@ -219,6 +220,10 @@ def load_candidate(path):
 
     store = stage_store()
     cand = Candidate(str(path), points=[], violations=[])
+    try:
+        cand.sha256 = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        pass  # store.load reports the unreadable file below
     ch, sc = chain(), chair()
     try:
         sp = store.load(path, urdf_text(), stage_pose(ch, sc), ch)
