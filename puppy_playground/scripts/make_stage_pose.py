@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from puppy_motion.flatbot import chair_scene
-from puppy_motion.escape import escape_path, unwrap_to
+from puppy_motion.escape import escape_path, grown_scene, unwrap_to
 from puppy_motion.stage import REST_Q, find_stage_poses, path_violations
 from puppy_motion.urdf import Chain
 import hashlib
@@ -20,19 +20,24 @@ chain = Chain.from_urdf(urdf)
 # continuous joints are turned to the whole-turn equivalent nearest the rest pose (same posture)
 # The first pose (in find_stage_poses order) the escape leg can actually reach from rest: some poses
 # have no route that keeps the forearm, wrist and head 0.35 m from the person all the way.
-q = None
-for cand in find_stage_poses(chain, chair_scene(), n=3, seed=0):
+q, index, failures = None, None, []
+for i, cand in enumerate(find_stage_poses(chain, chair_scene(), n=10, seed=0)):
     cand = unwrap_to(chain, REST_Q, cand)
     try:
         path = escape_path(chain, chair_scene(), REST_Q, cand)
     except ValueError as e:
-        print("skipped a pose:", e)
+        failures.append((i, str(e)))
+        print("pose", i, "skipped:", e, flush=True)
         continue
-    if path_violations(path, chain, chair_scene()) == []:
-        q = cand
-        break
+    bad = path_violations(path, chain, grown_scene(chair_scene(), 0.002))  # the candidate margin
+    if bad:
+        failures.append((i, f"{bad[0].rule}: {bad[0].detail}"))
+        print("pose", i, "fails the rules:", failures[-1][1], flush=True)
+        continue
+    q, index = cand, i
+    break
 if q is None:
-    raise SystemExit("no stage pose with a checked escape path")
+    raise SystemExit(f"BLOCKED: no stage pose with a checked escape path: {failures}")
 sha = subprocess.run(
     ["git", "log", "-1", "--format=%h", "--", ":(top)puppy_motion/puppy_motion/stage.py"],
     cwd=Path(__file__).resolve().parent,
@@ -40,7 +45,7 @@ sha = subprocess.run(
 ).stdout.strip()
 out = Path(__file__).resolve().parent.parent / "puppy_playground" / "data" / "stage_pose.json"
 out.write_text(
-    json.dumps({"q": [float(x) for x in q], "urdf_sha256": hashlib.sha256(urdf.encode("utf-8")).hexdigest(), "rules": f"stage.py@{sha}"}, indent=2) + "\n",
+    json.dumps({"q": [float(x) for x in q], "urdf_sha256": hashlib.sha256(urdf.encode("utf-8")).hexdigest(), "rules": f"stage.py@{sha}", "search_index": index}, indent=2) + "\n",
     encoding="utf-8",
 )
 print(out, q)

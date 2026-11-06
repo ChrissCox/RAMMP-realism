@@ -18,9 +18,8 @@ from capability_engine.arm import IMPEDANCE, QUEUE
 from capability_engine.engine import Action, CapabilityEngine, EngineError, run
 
 from puppy_motion import stage as stage_rules
-from puppy_motion.escape import escape_path
+from puppy_motion.escape import escape_path, grown_scene
 from puppy_motion.flatbot import CHAIR_LAYERS_COMMIT, chair_scene
-from puppy_motion.geometry import Box, Scene
 from puppy_motion.track import DT, Zone
 from puppy_motion.urdf import Chain
 from puppy_motion.validate import Violation, check_beat
@@ -118,16 +117,9 @@ class PuppyPlayground(CapabilityEngine):
             return True
         return 0.05 < pos < 0.93
 
-    @staticmethod
-    def _grown(scene, m):
-        def grow(boxes):
-            return [Box(b.center, b.half + m, b.R) for b in boxes]
-
-        return Scene(person=grow(scene.person), obstacles=grow(scene.obstacles))
-
     def _path_violations(self, points, chain, margin):
         """The stage-path rules on `points` against the chair scene grown by `margin` metres."""
-        return stage_rules.path_violations(points, chain, self._grown(chair_scene(), margin))
+        return stage_rules.path_violations(points, chain, grown_scene(chair_scene(), margin))
 
     def _load(self, path, urdf_text, chain, stage_q):
         """The StagePath in `path`, re-checked once per engine start (cached)."""

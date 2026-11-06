@@ -14,7 +14,7 @@ exactly the postures the forward path was checked on (see stage.path_violations)
 import numpy as np
 
 from .caps import DEFAULT_CAPS, guard_limits
-from .geometry import PARTS, clearances
+from .geometry import PARTS, Box, Scene, clearances
 from .stage import (
     OBSTACLE_KEEP_M, OBSTACLE_TOL_M, PERSON_STAGE_M, _FAR_PARTS, points_from_q, retime_path,
 )
@@ -29,6 +29,15 @@ BLEND_STEP_RAD = 0.01
 OBSTACLE_EXTRA_M = 0.003
 CLIMB_LIFT_M = 1e-5  # far parts end every step this far above their clearance at rest
 CLIMB_DIP_M = 0.0005  # a step may lower a part this much, never below its clearance at rest
+
+
+def grown_scene(scene, m):
+    """The scene with every box grown by `m` metres: a path that passes the rules against it holds
+    them with `m` to spare (stage paths are checked only at the 50 Hz samples)."""
+    def grow(boxes):
+        return [Box(b.center, b.half + m, b.R) for b in boxes]
+
+    return Scene(person=grow(scene.person), obstacles=grow(scene.obstacles))
 
 
 def _person(chain, scene, q):
