@@ -105,6 +105,29 @@ def _play(arm, ctx, chain, scene, beat_builder, held, rec, anchors):
     rec["goal"] = {
         "points": len(points), "seconds": float(points[-1][0]), "control_mode": "IMPEDANCE", "gains": "default",
     }
+    res = send_goal(arm, chain, points, rec, "beat")
+    try:  # the summary is for the log only: after the send, so it never delays the move
+        rec.update(playlog.summarize(points, chain, scene, held))
+    except Exception as e:  # noqa: BLE001
+        rec["summary_error"] = f"{type(e).__name__}: {e}"
+    raise_for_result(arm, res, "beat")
+    rec["ok"] = True
+    return rec
+
+
+def _estop_now(arm):
+    """Whether /control_status says e-stopped right now (an unreadable status is "no")."""
+    try:
+        return bool(arm.control_status().estopped)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def send_goal(arm, chain, points, rec, what):
+    """Send one IMPEDANCE / "default" / QUEUE joint-trajectory goal and return its result.
+    capability_engine's execute_joint_trajectory returns False (it does not raise) when the driver
+    refuses the goal, including an e-stop already on at send time: that becomes EngineError("estopped")
+    when /control_status says e-stopped, else a recoverable EngineError("refused", <arm.last_error>)."""
     try:
         res = arm.execute_joint_trajectory(
             chain.joint_names, points, control_mode=IMPEDANCE, gains="default", preemption=QUEUE
@@ -113,30 +136,36 @@ def _play(arm, ctx, chain, scene, beat_builder, held, rec, anchors):
         raise _ended(e)
     except ArmError as e:
         rec["driver"] = {"refused": str(e)}
-        raise EngineError("refused", f"the arm refused the beat: {e}", recoverable=True)
+        raise EngineError("refused", f"the arm refused the {what}: {e}", recoverable=True)
+    if res is False:
+        last = str(getattr(arm, "last_error", "") or "")
+        rec["driver"] = {"refused": last or "the driver refused the goal"}
+        if _estop_now(arm):
+            raise EngineError("estopped", f"the arm is e-stopped: the {what} was refused")
+        raise EngineError(
+            "refused", f"the driver refused the {what}: {last or 'no reason given'}", recoverable=True
+        )
     rec["driver"] = {"error_code": int(res.error_code), "error_string": res.error_string}
     final_error = getattr(res, "final_error", None)
     if final_error is not None:
         rec["driver"]["final_error"] = [float(x) for x in np.asarray(final_error, dtype=float).ravel()]
-    try:  # the summary is for the log only: after the send, so it never delays the move
-        rec.update(playlog.summarize(points, chain, scene, held))
-    except Exception as e:  # noqa: BLE001
-        rec["summary_error"] = f"{type(e).__name__}: {e}"
-    if res.error_code != 0:
-        name = ERRORS.get(int(res.error_code), res.error_string)
-        if name == "PREEMPTED":
-            raise EngineError("control_taken", "the beat was preempted: control was taken")
-        if name in ("PATH_TOLERANCE_VIOLATED", "GOAL_TOLERANCE_VIOLATED"):
-            raise EngineError(
-                "contact", "the arm stopped the beat early; possible contact; check the arm"
-            )
-        if res.error_code == HALTED:  # the driver halted it: an e-stop, else control was taken
-            if _estopped(arm):
-                raise EngineError("estopped", "the arm e-stopped during the beat")
-            raise EngineError("control_taken", "the driver halted the beat: control was taken")
-        raise EngineError("driver_error", f"the driver ended the beat: {res.error_string}", recoverable=True)
-    rec["ok"] = True
-    return rec
+    return res
+
+
+def raise_for_result(arm, res, what):
+    """Map a finished goal's non-zero error code: contact / estopped / control_taken / driver_error."""
+    if res.error_code == 0:
+        return
+    name = ERRORS.get(int(res.error_code), res.error_string)
+    if name == "PREEMPTED":
+        raise EngineError("control_taken", f"the {what} was preempted: control was taken")
+    if name in ("PATH_TOLERANCE_VIOLATED", "GOAL_TOLERANCE_VIOLATED"):
+        raise EngineError("contact", f"the arm stopped the {what} early; possible contact; check the arm")
+    if res.error_code == HALTED:  # the driver halted it: an e-stop, else control was taken
+        if _estopped(arm):
+            raise EngineError("estopped", f"the arm e-stopped during the {what}")
+        raise EngineError("control_taken", f"the driver halted the {what}: control was taken")
+    raise EngineError("driver_error", f"the driver ended the {what}: {res.error_string}", recoverable=True)
 
 
 def _estopped(arm):

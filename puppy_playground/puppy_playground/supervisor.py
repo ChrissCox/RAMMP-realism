@@ -18,8 +18,6 @@ GRACE_S = 2.0
 RETRY_GAP_S = 1.0
 SIZE_MIN, SIZE_MAX = 0.25, 1.0
 BUSY_STATES = ("executing", "paused")
-# auto result codes after which auto stays OFF until the user turns it on again
-STOP_CODES = frozenset({"drifted", "no_anchor", "contact", "control_taken", "estopped"})
 
 
 class State(enum.Enum):
@@ -99,22 +97,21 @@ class Supervisor:
         self._estop = bool(value)
         self._quiet_since = self._clock()
         if self._estop:
-            if self.state is not State.OFF:
-                return self._enter(State.ESTOPPED)
+            # an e-stop turns auto OFF, mid-beat or between beats: releasing it must not restart motion
+            return self._estop_off()
         elif self.state is State.ESTOPPED:
             return self._enter(self._waiting_state(self._clock()))
         return []
 
     def goal_done(self, code=None):
-        """The auto goal ended by itself: nothing to cancel. A stop code (drifted, contact, ...)
-        turns auto off for good: it never sends again until the user toggles it on."""
+        """The auto goal ended. If the supervisor did not cancel it (state still PLAYING) it ended by
+        itself, whether by failure or success: auto turns OFF with the error code (or "ended") and
+        never sends again until the user toggles it on. A goal the supervisor cancelled (a task
+        started, an e-stop, toggle off) is not PLAYING any more, so it is ignored here."""
         self._quiet_since = self._clock()
-        if code in STOP_CODES and self.state is not State.OFF:
-            self.off_reason = code
-            self.state = State.OFF
-            return []
         if self.state is State.PLAYING:
-            self.state = State.WAITING_IDLE
+            self.off_reason = code or "ended"
+            self.state = State.OFF
         return []
 
     def tick(self, now=None):
@@ -123,7 +120,7 @@ class Supervisor:
         if busy or self._estop:
             self._quiet_since = now
         if self._estop and self.state not in (State.OFF, State.ESTOPPED):
-            return Cancel() if self._enter(State.ESTOPPED) else None
+            return Cancel() if self._estop_off() else None
         if self.state is State.PLAYING:
             if busy:
                 self._enter(State.WAITING_FOR_TASK)
@@ -156,6 +153,13 @@ class Supervisor:
             if state != "idle" or heard is None or now - heard > STALE_S:
                 return True
         return False
+
+    def _estop_off(self):
+        if self.state in (State.OFF, State.ESTOPPED):
+            return []
+        cmds = self._enter(State.OFF)
+        self.off_reason = "estopped"
+        return cmds
 
     def _waiting_state(self, now):
         if self._estop:

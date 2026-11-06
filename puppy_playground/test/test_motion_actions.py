@@ -234,6 +234,11 @@ def test_gripper_stale_or_mid_range_counts_as_held():
     assert w.held()
 
 
+def test_a_nan_gripper_position_counts_as_held():
+    eng = SimpleNamespace(arm=SimpleNamespace(gripper_state=lambda: SimpleNamespace(position=float("nan"))))
+    assert PuppyPlayground._held(eng) is True
+
+
 def test_held_gripper_mutes_the_beat(env, stage_q):
     env.fake.set_gripper(0.5)
     env.at(stage_q)
@@ -441,3 +446,36 @@ def test_bad_size_and_seed_are_refused_not_clamped(env, stage_q):
     res = env.run("express", {"name": "nod", "size": 3.0})
     assert (res.status, res.error_code) == (Result.STATUS_FAILED, "bad_params")
     assert not goals(env)
+
+
+def test_a_goal_the_driver_refuses_ends_express_as_refused(env, stage_q):
+    env.at(stage_q)
+    env.fake.accept("execute_joint_trajectory", False)
+    res = env.run("express", {"name": "nod", "size": 0.25})
+    assert (res.status, res.error_code, res.recoverable) == (Result.STATUS_FAILED, "refused", True)
+    payload = json.loads(res.payload_json)
+    assert payload["action"] == "express" and payload["error_code"] == "refused"
+
+
+def test_an_estop_on_at_the_press_ends_express_and_auto_as_estopped(env, stage_q):
+    env.at(stage_q)
+    env.fake.engage_estop()
+    time.sleep(SETTLE_S)
+    res = env.run("express", {"name": "nod", "size": 0.25})
+    assert (res.status, res.error_code, res.recoverable) == (Result.STATUS_FAILED, "estopped", False)
+    res = env.finish(env.start("auto", {"size": 0.25, "seed": 1}), 90.0)
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "estopped")
+
+
+def test_a_false_result_from_the_arm_is_refused_not_an_attribute_error(stage_q, chain):
+    class FalseArm(StubArm):
+        last_error = "rejected: not ready"
+
+        def execute_joint_trajectory(self, *a, **k):
+            return False
+
+    arm = FalseArm(stage_q)
+    source = motion.BeatSource(chain, chair_scene(), stage_q)
+    with pytest.raises(EngineError) as e:
+        pipeline.play(arm, StubCtx(), chain, chair_scene(), lambda q, h: source.beat("head_tilt", 0.25, q, h), False)
+    assert (e.value.error_code, e.value.recoverable) == ("refused", True) and "rejected: not ready" in str(e.value)

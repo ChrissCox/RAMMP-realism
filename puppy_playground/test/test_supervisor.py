@@ -196,25 +196,40 @@ def test_no_control_status_yet_counts_as_estopped():
     assert sup.state is State.ESTOPPED
 
 
-def test_estop_cancels_and_holds_until_cleared_idle_and_three_quiet_seconds():
+def test_estop_while_playing_cancels_and_turns_auto_off_and_release_does_not_restart():
     r = Rig()
     r.play()
     assert r.sup.estopped(True) == [Cancel()]
-    assert r.sup.state is State.ESTOPPED
+    assert r.sup.state is State.OFF and r.sup.off_reason == "estopped"
     assert sends(r.step(10)) == []  # arm still the whole time
     r.sup.estopped(False)
+    assert r.sup.state is State.OFF
+    assert sends(r.step(60)) == []  # nothing is ever sent after the release
+    r.sup.toggle(True)  # the user re-enables auto
+    assert r.sup.off_reason is None
+    assert len(sends(r.step(10))) == 1
+
+
+def test_estop_between_beats_turns_auto_off_and_nothing_is_sent_after_release():
+    r = Rig()
+    r.still_s = 0.0
+    r.arm_still = False
+    r.step(2)  # waiting, never played
     assert r.sup.state is State.WAITING_IDLE
-    assert sends(r.step(2.8)) == []  # still arm, but the e-stop only just cleared
-    assert len(sends(r.step(0.5))) == 1
+    assert r.sup.estopped(True) == []
+    assert r.sup.state is State.OFF and r.sup.off_reason == "estopped"
+    r.sup.estopped(False)
+    r.arm_still = True
+    assert sends(r.step(60)) == []
 
 
-def test_estop_cleared_while_a_task_runs_waits_for_the_task():
+def test_estop_cleared_while_a_task_runs_stays_off():
     r = Rig()
     r.play()
     r.sup.estopped(True)
     r.task()
     r.sup.estopped(False)
-    assert r.sup.state is State.WAITING_FOR_TASK
+    assert r.sup.state is State.OFF
 
 
 def test_toggle_on_while_estopped_stays_estopped():
@@ -246,13 +261,12 @@ def test_toggle_off_when_not_playing_sends_nothing():
     assert r.sup.state is State.OFF
 
 
-def test_goal_done_does_not_cancel_the_ended_goal_and_waits_three_seconds():
+def test_goal_done_does_not_cancel_the_ended_goal_and_turns_auto_off():
     r = Rig()
     r.play()
     assert r.sup.goal_done() == []
-    assert r.sup.state is State.WAITING_IDLE
-    assert sends(r.step(2.8)) == []
-    assert len(sends(r.step(0.5))) == 1
+    assert r.sup.state is State.OFF and r.sup.off_reason == "ended"
+    assert r.step(30) == []
 
 
 def test_goal_done_is_ignored_when_not_playing():
@@ -268,7 +282,7 @@ def test_playing_tick_recancels_if_estop_appears_unreported():
     r.play()
     r.sup._estop = True  # a missed edge must still be caught by tick
     assert Cancel() in r.step(0.2)
-    assert r.sup.state is State.ESTOPPED
+    assert r.sup.state is State.OFF and r.sup.off_reason == "estopped"
 
 
 def test_seeds_change_between_sends():
@@ -276,25 +290,31 @@ def test_seeds_change_between_sends():
     r.still_s = 99
     a = sends(r.step(8))[0]
     r.sup.goal_done()
+    r.sup.toggle(True)
     b = sends(r.step(5))[0]
     assert a.seed != b.seed
 
 
-def test_a_stop_code_turns_auto_off_and_it_never_sends_again():
-    for code in ("drifted", "no_anchor", "contact", "control_taken", "estopped"):
+def test_any_auto_goal_that_ends_by_itself_turns_auto_off_with_its_code():
+    for code, reason in (("drifted", "drifted"), ("no_model", "no_model"), ("exception", "exception"),
+                         ("plan_only", "plan_only"), ("estopped", "estopped"), ("contact", "contact"),
+                         (None, "ended"), ("", "ended")):
         r = Rig()
         r.play()
         assert r.sup.goal_done(code) == []
-        assert r.sup.state is State.OFF and r.sup.off_reason == code
+        assert r.sup.state is State.OFF and r.sup.off_reason == reason
         assert r.step(60) == []
         r.sup.toggle(True)  # toggling on clears the reason and auto resumes
         assert r.sup.off_reason is None and r.sup.state is not State.OFF
         assert sends(r.step(10))
 
 
-def test_goal_done_without_a_stop_code_waits_as_before():
-    for code in (None, "driver_error", "check_failed"):
-        r = Rig()
-        r.play()
-        r.sup.goal_done(code)
-        assert r.sup.state is State.WAITING_IDLE and r.sup.off_reason is None
+def test_a_goal_the_supervisor_cancelled_for_a_task_is_ignored_and_auto_resumes_after_the_task():
+    r = Rig()
+    r.play()
+    assert r.task() == [Cancel()]
+    r.sup.goal_done()  # the cancelled result arrives
+    assert r.sup.state is State.WAITING_FOR_TASK and r.sup.off_reason is None
+    r.idle.add("rammp_task")
+    r.sup.engine_status("rammp_task", "idle")
+    assert sends(r.step(10))

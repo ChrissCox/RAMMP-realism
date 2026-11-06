@@ -16,6 +16,7 @@ from importlib import resources
 
 import numpy as np
 from capability_engine.arm import IMPEDANCE, QUEUE
+from capability_engine.driver_state import ArmError, ControlTaken, EStopped
 from capability_engine.engine import Action, CapabilityEngine, EngineError, run
 from capability_engine.sim import SimModelError
 
@@ -28,7 +29,7 @@ from puppy_motion.track import DT, Zone
 from puppy_motion.urdf import Chain
 from puppy_motion.validate import check_beat
 
-from . import motion, stage_store
+from . import motion, pipeline, stage_store
 
 STILL_RAD_S = 0.02  # every |dq| must be below this to start a move
 AT_TOL_RAD = 0.02  # "at" a path sample
@@ -37,6 +38,7 @@ RECOVER_STAGE_RAD = 0.10  # recover: this close to the stage pose, min-jerk to i
 STAGE_PATH = "/data/stage_path.json"
 CANDIDATE_PATH = "/data/stage_path.candidate.json"
 LOG_PATH = "/data/playground.jsonl"
+BLEND_S = 1.0  # stage / rest: the stored path is blended onto the reading over this long
 
 _SIZE = {"type": "number", "minimum": 0.25, "maximum": 1.0, "default": 0.25}
 
@@ -83,6 +85,7 @@ class PuppyPlayground(CapabilityEngine):
 
         self._checked = {}  # (path sha256, chair-scene commit, urdf sha256) -> violations
         self._chains = {}  # urdf sha256 -> Chain
+        self._failure = None  # (action, error code, message) of the action that last failed
 
     # -- helpers ---------------------------------------------------------------------------------
 
@@ -110,7 +113,12 @@ class PuppyPlayground(CapabilityEngine):
 
     def _still_q(self):
         """The measured joints, refusing unless every one is finite and every |dq| < STILL_RAD_S."""
-        js = self.arm.joint_states()
+        try:
+            js = self.arm.joint_states()
+        except (EStopped, ControlTaken) as e:
+            raise pipeline._ended(e)
+        except ArmError as e:
+            raise EngineError("no_state", f"cannot read the arm: {e}", recoverable=True)
         pos, vel = np.asarray(js.position, dtype=float), np.asarray(js.velocity, dtype=float)
         if pos.shape != (7,) or vel.shape != (7,) or not np.isfinite(pos).all():
             raise EngineError("bad_state", "the joint reading is malformed", recoverable=True)
@@ -135,7 +143,7 @@ class PuppyPlayground(CapabilityEngine):
             pos = self.arm.gripper_state().position
         except Exception:  # noqa: BLE001 -- no fresh gripper state counts as held
             return True
-        return 0.05 < pos < 0.93
+        return not np.isfinite(pos) or 0.05 < pos < 0.93
 
     def _path_violations(self, points, chain, margin):
         """The stage-path rules on `points` against the chair scene grown by `margin` metres."""
@@ -159,15 +167,45 @@ class PuppyPlayground(CapabilityEngine):
     def _send(self, chain, points, q_measured, rec):
         """Send `points` turned (whole turns of the continuous joints, the same for every point) to
         the measured reading; clearances are 2*pi-periodic and those joints have no limits, so the
-        checked path is unchanged."""
+        checked path is unchanged. A refused goal, an e-stop or a driver abort raises the same
+        EngineErrors a beat does (pipeline.send_goal / raise_for_result)."""
         points = align_turns(chain, q_measured, points)
         rec["goal"] = {"points": len(points), "seconds": points[-1][0], "control_mode": "IMPEDANCE", "gains": "default"}
-        res = self.arm.execute_joint_trajectory(
-            chain.joint_names, points, control_mode=IMPEDANCE, gains="default", preemption=QUEUE
-        )
-        rec["driver"] = {"error_code": int(res.error_code), "error_string": res.error_string}
-        if res.error_code != 0:
-            raise EngineError("driver_error", f"the driver ended the move: {res.error_string}", recoverable=True)
+        res = pipeline.send_goal(self.arm, chain, points, rec, "move")
+        pipeline.raise_for_result(self.arm, res, "move")
+
+    @staticmethod
+    def _blend(chain, points, q):
+        """The stored path with its start moved onto the reading `q`: sent(t) = stored(t) + w(t) * delta,
+        delta = the wrap-aware shortest step stored[0] -> q, w a min-jerk weight from 1 at t = 0 to 0 at
+        BLEND_S (or the path's end if shorter) and 0 after. The last point is exactly the stored one, so
+        offsets never accumulate over Stage / Rest cycles. Velocities are the central differences of
+        the blended samples (the stored ones are, too, plus the w'(t) * delta term)."""
+        stored = np.array([p[1] for p in points], dtype=float)
+        t = np.array([p[0] for p in points], dtype=float)
+        delta = shortest_delta(chain, stored[0], q)
+        blend_s = min(BLEND_S, float(t[-1]))
+        x = np.clip(t / blend_s, 0.0, 1.0)
+        w = 1.0 - (10.0 * x**3 - 15.0 * x**4 + 6.0 * x**5)
+        out = stored + w[:, None] * delta
+        out[0] = stored[0] + delta
+        out[-1] = stored[-1]
+        return stage_rules.points_from_q(out)
+
+    def _seat_and_check(self, chain, points, q, full_rules, rec):
+        """Blend `points` onto the reading `q`, turn them to it, check exactly what will be sent
+        (the stage-path rules at MARGIN_M, or only caps and ends for a reversed path), then refuse
+        `moved` if the arm has since moved. Returns the points to send."""
+        blended = align_turns(chain, q, self._blend(chain, points, q))
+        if full_rules:
+            bad = self._path_violations(blended, chain, stage_store.MARGIN_M)
+        else:
+            bad = self._caps_ends(blended, chain)
+        rec["checks"] = [f"{v.rule}: {v.detail}" for v in bad]
+        if bad:
+            raise EngineError("unsafe_move", f"the move from the reading breaks {bad[0].rule}: {bad[0].detail}")
+        self._unmoved(chain, q)
+        return blended
 
     def _log(self, rec):
         try:
@@ -185,6 +223,7 @@ class PuppyPlayground(CapabilityEngine):
     # -- actions ---------------------------------------------------------------------------------
 
     def execute(self, action_id, params, ctx):
+        self._failure = None
         handler = {
             "plan_stage": self._plan_stage, "stage": self._stage, "rest": self._rest, "recover": self._recover,
             "express": lambda c, r: motion.express(self, c, r),
@@ -192,6 +231,7 @@ class PuppyPlayground(CapabilityEngine):
             "auto": lambda c, r: motion.auto(self, c, r),
         }.get(action_id)
         if handler is None:
+            self._failure = (action_id, "not_yet", f"{action_id} is not implemented yet")
             raise EngineError("not_yet", f"{action_id} is not implemented yet")
         rec = {"t": time.time(), "action": action_id, "params": params}
         try:
@@ -203,9 +243,28 @@ class PuppyPlayground(CapabilityEngine):
         except BaseException as e:
             rec["ok"] = False
             rec["error"] = f"{type(e).__name__}: {e}"
+            if isinstance(e, EngineError):
+                self._failure = (action_id, e.error_code, str(e))
+            else:
+                self._failure = (action_id, "exception", rec["error"])
             raise
         finally:
             self._log(rec)
+
+    def _on_execute(self, goal_handle):
+        """capability_engine sets payload_json only on success. Every failed or refused action also
+        carries {"action", "error_code", "message"} so the page can show the rule that broke."""
+        self._failure = None
+        out = super()._on_execute(goal_handle)
+        result = out.result.result
+        if result.status == result.STATUS_FAILED:
+            action = goal_handle.request.action_id
+            failure = self._failure
+            message = failure[2] if failure and failure[1] == result.error_code else result.error_code
+            result.payload_json = json.dumps(
+                {"action": action, "error_code": result.error_code, "message": message}
+            )
+        return out
 
     def _plan_stage(self, ctx, rec):
         if os.path.abspath(self.candidate_path) == os.path.abspath(self.stage_path):
@@ -244,7 +303,9 @@ class PuppyPlayground(CapabilityEngine):
                 os.remove(self.candidate_path)  # a stale candidate must not look like this plan's
             except FileNotFoundError:
                 pass
-            out = {"violations": [f"{m}: {v}" for m, vs in tried.items() for v in vs], "candidate": None, "method": None}
+            rec["tried"] = tried
+            why = "; ".join(f"{m}: {', '.join(vs) or 'rejected'}" for m, vs in tried.items())
+            raise EngineError("no_candidate", f"no planner produced a passing stage path ({why})", recoverable=True)
         else:
             method, points = found
             stage_store.save(self.candidate_path, points, urdf_text, stage_q, method=method)
@@ -277,8 +338,9 @@ class PuppyPlayground(CapabilityEngine):
         q = self._still_q()
         if not self._near(chain, q, sp.points[0][1], AT_TOL_RAD):
             raise EngineError("not_at_start", "the arm is not at the path's start (rest)")
-        self._send(chain, sp.points, q, rec)
-        return {"points": len(sp.points)}
+        points = self._seat_and_check(chain, sp.points, q, True, rec)
+        self._send(chain, points, q, rec)
+        return {"points": len(points)}
 
     def _rest(self, ctx, rec):
         urdf_text, chain = self._urdf()
@@ -292,6 +354,7 @@ class PuppyPlayground(CapabilityEngine):
         q = self._still_q()
         if not self._near(chain, q, sp.points[-1][1], AT_TOL_RAD):
             raise EngineError("not_at_end", "the arm is not at the path's end (stage)")
+        pts = self._seat_and_check(chain, pts, q, False, rec)
         self._send(chain, pts, q, rec)
         return {"points": len(pts)}
 

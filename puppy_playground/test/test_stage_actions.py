@@ -348,14 +348,15 @@ def test_plan_stage_refuses_from_elsewhere(env):
     assert not env.fake.goals["plan_to_joints"]
 
 
-def test_plan_stage_with_no_passing_plan_deletes_a_stale_candidate_and_reports(env, monkeypatch):
+def test_plan_stage_with_no_passing_plan_deletes_a_stale_candidate_and_fails_saying_what_was_tried(env, monkeypatch):
     env.cand_file.write_text("stale")
     monkeypatch.setattr(env.engine, "_candidate_points", lambda *a, **k: None)  # every planner fails
     env.at(HOME)
     res = env.run("plan_stage")
-    assert res.status == Result.STATUS_SUCCESS, res.error_code
+    assert (res.status, res.error_code, res.recoverable) == (Result.STATUS_FAILED, "no_candidate", True)
     out = json.loads(res.payload_json)
-    assert out["candidate"] is None and out["method"] is None and out["violations"]
+    assert out["action"] == "plan_stage" and out["error_code"] == "no_candidate"
+    assert "curobo: no plan" in out["message"] and "min_jerk: no plan" in out["message"] and "escape: no plan" in out["message"]
     assert not env.cand_file.exists()
 
 
@@ -494,3 +495,137 @@ def test_a_driver_without_a_model_refuses_with_no_model(env, monkeypatch):
     env.at(HOME)
     res = env.run("plan_stage")
     assert (res.status, res.error_code) == (Result.STATUS_FAILED, "no_model")
+
+
+# ---- a refused goal, the failure payload, and the seat onto the reading --------------------------
+
+
+def test_a_refused_stage_carries_the_action_the_code_and_the_rule_in_its_payload(env, urdf_text, stage_q, path_points):
+    approve(env, urdf_text, stage_q, path_points)
+    env.at(HOME + 0.3)
+    res = env.run("stage")
+    assert res.error_code == "not_at_start"
+    assert json.loads(res.payload_json) == {
+        "action": "stage",
+        "error_code": "not_at_start",
+        "message": "the arm is not at the path's start (rest)",
+    }
+
+
+@pytest.mark.parametrize("action,at_q", [("stage", "home"), ("rest", "stage")])
+def test_a_goal_the_driver_refuses_is_refused_not_an_exception(env, urdf_text, stage_q, path_points, action, at_q):
+    approve(env, urdf_text, stage_q, path_points)
+    env.fake.accept("execute_joint_trajectory", False)
+    env.at(HOME if at_q == "home" else stage_q)
+    res = env.run(action)
+    assert (res.status, res.error_code, res.recoverable) == (Result.STATUS_FAILED, "refused", True)
+    assert json.loads(res.payload_json)["error_code"] == "refused"
+
+
+@pytest.mark.parametrize("action,at_q", [("stage", "home"), ("rest", "stage")])
+def test_an_estop_on_at_the_press_is_estopped_and_not_recoverable(env, urdf_text, stage_q, path_points, action, at_q):
+    approve(env, urdf_text, stage_q, path_points)
+    env.at(HOME if at_q == "home" else stage_q)
+    env.fake.engage_estop()
+    time.sleep(SETTLE_S)
+    res = env.run(action)
+    assert (res.status, res.error_code, res.recoverable) == (Result.STATUS_FAILED, "estopped", False)
+
+
+def test_recover_reuses_the_driver_error_mapping(env, urdf_text, stage_q, path_points):
+    approve(env, urdf_text, stage_q, path_points)
+    env.fake.set_result("execute_joint_trajectory", -4)  # a path tolerance violation
+    env.at(stage_q + 0.05)
+    res = env.run("recover")
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "contact")
+
+
+def sent_points(env):
+    g, pts = sent(env)
+    return np.array([q for q, _ in pts])
+
+
+def rule_failures(urdf_text, qs, full):
+    from puppy_motion.escape import grown_scene
+    from puppy_motion.stage import path_violations, points_from_q
+
+    chain = Chain.from_urdf(urdf_text)
+    scene = grown_scene(chair_scene(), stage_store.MARGIN_M) if full else chair_scene()
+    bad = path_violations(points_from_q(qs), chain, scene)
+    return bad if full else [v for v in bad if v.rule in ("path_caps", "path_ends")]
+
+
+def test_stage_from_a_reading_off_rest_starts_at_the_reading_and_ends_at_the_stored_pose(
+    env, urdf_text, stage_q, path_points
+):
+    approve(env, urdf_text, stage_q, path_points)
+    reading = HOME.copy()
+    reading[1] += 0.015  # j2 sags 0.015 rad off the stored rest
+    env.at(reading)
+    res = env.run("stage")
+    assert res.status == Result.STATUS_SUCCESS, res.error_code
+    qs = sent_points(env)
+    stored = np.array([p[1] for p in path_points])
+    assert np.allclose(qs[0], reading, atol=1e-9)
+    assert np.allclose(qs[-1], stored[-1], atol=1e-9)  # the end is exact
+    assert len(qs) == len(stored)
+    after = int(round(1.0 / 0.01)) + 1
+    assert np.allclose(qs[after:], stored[after:], atol=1e-9)  # w == 0 after BLEND_S
+    assert rule_failures(urdf_text, qs, True) == []  # the stage rules at MARGIN_M, caps and ends
+
+
+def test_rest_from_a_reading_off_the_stage_pose_starts_at_the_reading_and_ends_at_rest(
+    env, urdf_text, stage_q, path_points
+):
+    approve(env, urdf_text, stage_q, path_points)
+    reading = stage_q.copy()
+    reading[1] += 0.015
+    env.at(reading)
+    res = env.run("rest")
+    assert res.status == Result.STATUS_SUCCESS, res.error_code
+    qs = sent_points(env)
+    stored = np.array([p[1] for p in path_points])[::-1]
+    assert np.allclose(qs[0], reading, atol=1e-9)
+    assert np.allclose(qs[-1], stored[-1], atol=1e-9)
+    assert rule_failures(urdf_text, qs, False) == []
+
+
+@pytest.mark.parametrize("action", ["stage", "rest"])
+def test_a_blended_path_that_breaks_a_rule_is_refused_and_nothing_is_sent(
+    env, urdf_text, stage_q, path_points, monkeypatch, action
+):
+    from types import SimpleNamespace
+
+    approve(env, urdf_text, stage_q, path_points)
+    start = HOME if action == "stage" else stage_q
+    reading = start.copy()
+    reading[1] += 0.015
+    real_full, real_caps = env.engine._path_violations, env.engine._caps_ends
+    bad = [SimpleNamespace(rule="path_caps", detail="constructed")]
+
+    def off_start(points):
+        return float(np.abs(np.asarray(points[0][1]) - start).max()) > 1e-6
+
+    monkeypatch.setattr(
+        env.engine, "_path_violations", lambda pts, chain, margin: bad if off_start(pts) else real_full(pts, chain, margin)
+    )
+    monkeypatch.setattr(env.engine, "_caps_ends", lambda pts, chain: bad if off_start(pts) else real_caps(pts, chain))
+    env.at(reading)
+    res = env.run(action)
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "unsafe_move")
+    assert "constructed" in json.loads(res.payload_json)["message"]
+    assert not env.fake.goals["execute_joint_trajectory"]
+
+
+@pytest.mark.parametrize("action", ["stage", "rest"])
+def test_stage_and_rest_refuse_moved_when_the_arm_moves_during_the_checks(
+    env, urdf_text, stage_q, path_points, monkeypatch, action
+):
+    approve(env, urdf_text, stage_q, path_points)
+    start = HOME if action == "stage" else stage_q
+    env.at(start)
+    reads = iter([start, start + 0.01])
+    monkeypatch.setattr(env.engine, "_still_q", lambda: next(reads))
+    res = env.run(action)
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "moved")
+    assert not env.fake.goals["execute_joint_trajectory"]
