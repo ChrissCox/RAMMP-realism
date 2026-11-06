@@ -1,0 +1,90 @@
+"""The playground previews: flatbot's chair scene, the stage still, and the driver model's
+positions+velocities execution of every expression at size 1.0."""
+
+import hashlib
+import json
+
+import numpy as np
+import pytest
+
+from puppy_sim import checks, dynamics, render, scene
+from puppy_sim.clips import playground_expressions as pe
+from puppy_sim.clips import playground_stage as ps
+from puppy_sim.clips import registry
+from puppy_sim.clips.playground_common import STAGE_POSE_JSON, Assembler, chain, chair, points_q, stage_pose, urdf_text
+from puppy_sim.flatbot_scene import FLATBOT
+
+CLIPS = ("playground_stage", "playground_expressions", "playground_auto")
+
+
+def test_clips_registered_and_pass_check():
+    clips = registry()
+    for name in CLIPS:
+        assert name in clips and clips[name].run == FLATBOT
+        for _, _, _, results, _ in checks.check_named(name):
+            assert checks.passed(results), [c for c in results if not c.ok]
+
+
+def test_stage_still_exists_and_pose_meets_the_rules():
+    from puppy_motion import stage
+
+    assert ps.STILL_PATH.exists() and ps.STILL_PATH.stat().st_size > 20_000
+    doc = json.loads(STAGE_POSE_JSON.read_text())
+    q = np.array(doc["q"])
+    assert q.shape == (7,)
+    assert doc["urdf_sha256"] == hashlib.sha256(urdf_text().encode("utf-8")).hexdigest()
+    assert doc["rules"].startswith("stage.py@")
+    assert np.allclose(q, stage_pose(), atol=1e-12)  # the first pose of find_stage_poses, seed 0
+    assert stage.stage_violations(chain(), chair(), q) == []
+
+
+def test_flatbot_scene_draws_the_layer_boxes_without_a_mannequin():
+    sc = scene.build(FLATBOT)
+    m = sc.model
+    names = {m.body(m.geom_bodyid[g]).name for g in range(m.ngeom)}
+    assert "person" in names and "chair" in names
+    assert len(sc.groups["person"]) == len(chair().person) and len(sc.groups["chair"]) == len(chair().obstacles)
+    assert not any(m.geom(g).name in ("head", "torso") for g in range(m.ngeom))
+    assert (m.mat_rgba[m.geom_matid[sc.groups["person"]]][:, 3] < 0.5).all()  # translucent
+
+
+def test_positions_velocities_reference_is_cubic_hermite_with_central_velocities():
+    q = np.cumsum(np.random.default_rng(1).normal(0, 0.01, (12, 7)), axis=0)
+    ref, qd, qdd = dynamics.reference(type("T", (), {"q": q})(), dynamics.VELOCITIES)
+    assert np.allclose(ref[:: dynamics.STEPS_PER_SAMPLE], q)  # passes through every waypoint
+    assert not qdd.any()
+    mid = 5 * dynamics.STEPS_PER_SAMPLE
+    assert np.allclose(qd[mid], (q[6] - q[4]) / (2 * dynamics.DT), atol=1e-6)
+    assert not qd[0].any() and not qd[-1].any()
+
+
+def _head_floor_margins(track_q, q_cmd):
+    """Least margin (m) of the achieved q over check_beat's clearance floors (set by the start)."""
+    from puppy_motion.geometry import clearances
+    from puppy_motion.validate import NEAR_USER_M, OBSTACLE_KEEP_M, OBSTACLE_TOL_M, PERSON_SLACK_M
+
+    ch, sc = chain(), chair()
+    c0 = clearances(ch, sc, q_cmd[0], False)
+    floor_p = np.minimum(c0[0], NEAR_USER_M) - PERSON_SLACK_M
+    floor_o = np.minimum(c0[1], OBSTACLE_KEEP_M) - OBSTACLE_TOL_M
+    person, obstacle = np.inf, np.inf
+    for q in track_q:
+        c = clearances(ch, sc, q, False)
+        person, obstacle = min(person, float((c[0] - floor_p).min())), min(obstacle, float((c[1] - floor_o).min()))
+    return person, obstacle
+
+
+def test_driver_model_overshoot_with_positions_and_velocities_is_within_the_checks():
+    """Every expression at size 1.0 under impedance 'default', sent as positions + central-difference
+    velocities (no accelerations): the arm's own clearance never drops under check_beat's floors."""
+    sc = scene.build(FLATBOT)
+    ctl = dynamics.control("impedance:default", feedforward=dynamics.VELOCITIES)
+    beats, _ = pe.expression_beats(1.0)
+    assert all(b is not None for b in beats.values())
+    for name, (points, _) in beats.items():
+        a = Assembler(points[0][1])
+        a.add(points_q(points))
+        track = a.track(name)
+        ach = dynamics.achieved(track, ctl, sc)
+        person, obstacle = _head_floor_margins(ach.q[:: 2], track.q[:: 2])
+        assert person >= 0.0 and obstacle >= 0.0, (name, person, obstacle)

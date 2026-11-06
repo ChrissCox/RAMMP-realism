@@ -616,7 +616,12 @@ def _carry_in_tool(placement, k, q_close):
 
 @lru_cache(maxsize=4)
 def build(run_name=REFERENCE_RUN):
-    """The full scene with the container where `run_name` closed the gripper."""
+    """The full scene with the container where `run_name` closed the gripper (run_name 'flatbot':
+    the empty flatbot chair instead, see flatbot_scene)."""
+    if run_name == "flatbot":
+        from . import flatbot_scene
+
+        return flatbot_scene.build()
     placement = grasp_placement(run_name)
     spec = _robot_spec()
     _add_look(spec)

@@ -51,6 +51,7 @@ from .kin import VEL_LIMITS
 from .timeline import DT, PRECISION, Track
 
 POSITION, IMPEDANCE = "position", "impedance"
+VELOCITIES = "velocities"  # Control.feedforward: positions + velocities, no accelerations
 CONTROL_HZ = 1000.0  # RtExecutor rate_hz and the Supervisor's sampler_hz
 CONTROL_DT = 1.0 / CONTROL_HZ
 STEPS_PER_SAMPLE = int(round(DT / CONTROL_DT))  # control cycles per 50 Hz track sample
@@ -119,7 +120,9 @@ PROFILES["default"] = replace(PROFILES[SESSION_DEFAULT], name="default")
 @dataclass(frozen=True)
 class Control:
     """How the driver executes a track: POSITION, or IMPEDANCE with gains. feedforward: the
-    trajectory carries velocities and accelerations (as cuRobo's plans do), else positions only."""
+    trajectory carries velocities and accelerations (as cuRobo's plans do); False: positions only;
+    VELOCITIES: positions and velocities, no accelerations (what the playground's
+    execute_joint_trajectory sends: central-difference dq, zero at both ends)."""
 
     mode: str = POSITION
     gains: Gains | None = None
@@ -129,7 +132,7 @@ class Control:
     def label(self):
         if self.mode == POSITION:
             return POSITION
-        return f"{IMPEDANCE}:{self.gains.name}" + ("" if self.feedforward else " (positions only)")
+        return f"{IMPEDANCE}:{self.gains.name}" + _ff_suffix(self.feedforward, " (positions only)", " (positions+velocities)")
 
     def describe(self):
         """Plain words for a subtitle."""
@@ -138,6 +141,10 @@ class Control:
         g = self.gains
         alias = f" = {SESSION_DEFAULT}" if g.name == "default" else ""
         return f"impedance '{g.name}'{alias} ({g.describe()})"
+
+
+def _ff_suffix(feedforward, none, velocities):
+    return velocities if feedforward == VELOCITIES else ("" if feedforward else none)
 
 
 def control(spec, feedforward=True):
@@ -187,7 +194,9 @@ def slug(spec, plant=None):
     """A file-name tag for a control (and a non-default plant): 'impedance_default', ..."""
     ctl = control(spec)
     out = (
-        ctl.mode if ctl.mode == POSITION else f"{IMPEDANCE}_{ctl.gains.name}" + ("" if ctl.feedforward else "_posonly")
+        ctl.mode
+        if ctl.mode == POSITION
+        else f"{IMPEDANCE}_{ctl.gains.name}" + _ff_suffix(ctl.feedforward, "_posonly", "_posvel")
     )
     plant = plant or DEFAULT_PLANT
     if plant.armature != DEFAULT_PLANT.armature:
@@ -299,8 +308,10 @@ def controller_terms(ctrl_m, ctrl_d, q):
 def reference(track, feedforward=True):
     """The trajectory sampled at the control rate, as interface::sample_target does from the
     track's 50 Hz waypoints: (q, qd, qdd), each (n_ctrl, 7). With feedforward the waypoints carry
-    finite-difference velocities and accelerations and are joined by quintic Hermite; without,
-    by straight lines (qd = qdd = 0: no profile)."""
+    finite-difference velocities and accelerations and are joined by quintic Hermite; with
+    VELOCITIES the waypoints carry central-difference velocities only (zero at both ends, as
+    beat.to_points) and are joined by cubic Hermite, qdd = 0; without, by straight lines
+    (qd = qdd = 0: no profile)."""
     q = np.asarray(track.q, dtype=float)
     n_ctrl = (len(q) - 1) * STEPS_PER_SAMPLE + 1
     seg = np.minimum(np.arange(n_ctrl) // STEPS_PER_SAMPLE, len(q) - 2)
@@ -310,6 +321,16 @@ def reference(track, feedforward=True):
         qr = a + u * (b - a)
         qr[-1] = q[-1]
         return qr, np.zeros_like(a), np.zeros_like(a)
+    if feedforward == VELOCITIES:
+        qd_w = np.zeros_like(q)
+        qd_w[1:-1] = (q[2:] - q[:-2]) / (2.0 * DT)
+        v0, v1 = qd_w[seg] * DT, qd_w[seg + 1] * DT
+        d = b - a
+        c2, c3 = 3.0 * d - 2.0 * v0 - v1, -2.0 * d + v0 + v1
+        qr = a + v0 * u + c2 * u**2 + c3 * u**3
+        qdr = (v0 + 2.0 * c2 * u + 3.0 * c3 * u**2) / DT
+        qr[-1], qdr[-1] = q[-1], qd_w[-1]
+        return qr, qdr, np.zeros_like(a)
     qd_w = np.gradient(q, DT, axis=0)
     qdd_w = np.gradient(qd_w, DT, axis=0)
     span = DT
