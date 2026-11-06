@@ -82,8 +82,8 @@ class BeatSource:
 
     def beat(self, name, size, q, held, seed=EXPRESS_SEED):
         """The beat for `name` at the measured q: the cached stage beat when q is at the stage pose
-        (to the pipeline's start tolerance), else composed live at q."""
-        if np.abs(pipeline.shortest_delta(self.chain, q, self.stage_q)).max() < pipeline.START_TOL_RAD:
+        (to the pipeline's shift tolerance; the pipeline shifts and re-checks it), else composed live at q."""
+        if np.abs(pipeline.shortest_delta(self.chain, q, self.stage_q)).max() < pipeline.SHIFT_TOL_RAD:
             key = ("stage", name, size, bool(held), seed)
             with self._lock:
                 if key not in self._cache:

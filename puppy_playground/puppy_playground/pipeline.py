@@ -14,31 +14,12 @@ from capability_engine.engine import EngineError
 
 from puppy_motion.validate import check_beat
 
-try:
-    from puppy_motion.joints import align_turns, shortest_delta
-except ImportError:  # until Task 5's joints.py lands; same names and meaning, remove then
-
-    def _continuous(chain):
-        return ~np.isfinite(np.asarray(chain.pos_limits, dtype=float)).all(axis=1)
-
-    def shortest_delta(chain, q_from, q_to):
-        d = np.asarray(q_to, dtype=float) - np.asarray(q_from, dtype=float)
-        m = _continuous(chain)
-        d[m] = (d[m] + np.pi) % (2 * np.pi) - np.pi
-        return d
-
-    def align_turns(chain, q_ref, points):
-        shift = np.zeros(len(q_ref))
-        m = _continuous(chain)
-        first = np.asarray(points[0][1], dtype=float)
-        shift[m] = 2 * np.pi * np.round((np.asarray(q_ref, dtype=float) - first)[m] / (2 * np.pi))
-        return [(t, np.asarray(q, dtype=float) + shift, dq) for t, q, dq in points]
-
+from puppy_motion.joints import align_turns, shortest_delta
 
 from . import playlog
 
 STILL_RAD_S = 0.02  # every |dq| must be below this to start a beat
-START_TOL_RAD = 0.002  # the beat must start this close to the measured posture
+SHIFT_TOL_RAD = 0.02  # a beat starting this close to the measured posture is shifted onto it
 HALT_STATUS_WAIT_S = 0.5  # after a HALTED goal, how long /control_status may take to show an e-stop
 
 
@@ -92,11 +73,15 @@ def _play(arm, ctx, chain, scene, beat_builder, held, rec):
     if speed >= STILL_RAD_S:
         raise EngineError("not_still", "the arm is moving", recoverable=True)
     gap = float(np.abs(shortest_delta(chain, q, points[0][1])).max())
-    if gap >= START_TOL_RAD:
+    if gap > SHIFT_TOL_RAD:
         raise EngineError(
             "start_mismatch", f"the arm is {gap:.4f} rad from where the beat starts", recoverable=True
         )
     points = align_turns(chain, q, points)  # the driver reports continuous joints wrapped
+    offset = q - np.asarray(points[0][1], dtype=float)  # under SHIFT_TOL_RAD on every joint
+    points = [(t, np.asarray(pq, dtype=float) + offset, dq) for t, pq, dq in points]
+    points[0] = (points[0][0], q.copy(), points[0][2])  # exactly the measured posture
+    rec["shift_rad"] = float(gap)
     found = check_beat(points, q, chain, scene, beat.zone, held=held)
     rec["checks"] = [f"{v.rule}: {v.detail}" for v in found]
     if found:

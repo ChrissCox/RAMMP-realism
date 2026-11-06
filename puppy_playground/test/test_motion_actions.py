@@ -255,9 +255,9 @@ def test_no_gripper_goal_is_ever_sent(env, stage_q, chain):
     assert all(list(g.trajectory.joint_names) == list(chain.joint_names) for g in goals(env))
 
 
-def test_a_beat_that_starts_away_from_the_measured_posture_is_skipped(stage_q, chain):
+def test_a_beat_that_starts_far_from_the_measured_posture_is_skipped(stage_q, chain):
     arm = StubArm(stage_q)
-    off = stage_q + 0.005
+    off = stage_q + 0.05
     pts = [(0.0, off, np.zeros(7)), (0.02, off, np.zeros(7))]
     log = []
     with pytest.raises(EngineError) as e:
@@ -266,6 +266,62 @@ def test_a_beat_that_starts_away_from_the_measured_posture_is_skipped(stage_q, c
         )
     assert e.value.error_code == "start_mismatch" and e.value.recoverable
     assert not arm.sent and log and log[0]["ok"] is False
+
+
+def test_a_cached_beat_slightly_off_is_shifted_onto_the_measured_pose_and_checked(stage_q, chain, monkeypatch):
+    scene = chair_scene()
+    source = motion.BeatSource(chain, scene, stage_q)
+    measured = stage_q.copy()
+    measured[1] += 0.01
+    measured[4] -= 0.01
+    arm = StubArm(measured)
+    seen = []
+    real = pipeline.check_beat
+
+    def spy(points, q, *a, **k):
+        seen.append((np.array(points[0][1]), np.array(q)))
+        return real(points, q, *a, **k)
+
+    monkeypatch.setattr(pipeline, "check_beat", spy)
+    rec = pipeline.play(arm, StubCtx(), chain, scene, lambda q, h: source.beat("head_tilt", 0.25, q, h), False)
+    assert rec["ok"] and len(arm.sent) == 1
+    sent_points = arm.sent[0][0][1]
+    assert np.array_equal(sent_points[0][1], measured) and np.array_equal(seen[0][0], measured)
+    assert np.allclose(sent_points[-1][1], measured)
+    assert np.all(sent_points[0][2] == 0) and np.all(sent_points[-1][2] == 0)
+    assert ("stage", "head_tilt", 0.25, False, 0) in source._cache  # composed once for the stage pose
+
+
+def test_a_beat_far_from_the_stage_pose_is_composed_live_at_the_measured_pose(stage_q, chain):
+    scene = chair_scene()
+    source = motion.BeatSource(chain, scene, stage_q)
+    measured = stage_q.copy()
+    measured[1] += 0.05
+    measured[3] -= 0.05
+    arm = StubArm(measured)
+    rec = pipeline.play(arm, StubCtx(), chain, scene, lambda q, h: source.beat("nod", 0.25, q, h), False)
+    assert rec["ok"] and len(arm.sent) == 1
+    assert np.array_equal(arm.sent[0][0][1][0][1], measured)
+    assert not source._cache  # not cached: composed at the measured pose
+
+
+def test_a_shifted_beat_that_fails_its_check_sends_nothing(stage_q, chain, monkeypatch):
+    scene = chair_scene()
+    source = motion.BeatSource(chain, scene, stage_q)
+    measured = stage_q.copy()
+    measured[1] += 0.01
+    arm = StubArm(measured)
+    seen = []
+
+    def refuse(points, q, *a, **k):
+        seen.append(np.array(points[0][1]))
+        return [Violation("obstacle", 5, "shifted into the seat")]
+
+    monkeypatch.setattr(pipeline, "check_beat", refuse)
+    with pytest.raises(EngineError) as e:
+        pipeline.play(arm, StubCtx(), chain, scene, lambda q, h: source.beat("nod", 0.25, q, h), False)
+    assert e.value.error_code == "check_failed" and not arm.sent
+    assert np.array_equal(seen[0], measured)  # it was the shifted beat that was checked
 
 
 def test_express_plays_when_the_driver_reports_continuous_joints_wrapped(env, stage_q, chain):
