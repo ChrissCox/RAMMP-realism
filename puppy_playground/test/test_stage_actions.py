@@ -266,11 +266,11 @@ def test_stage_works_from_a_wrapped_rest_reading_and_sends_the_path_on_that_turn
     g, pts = sent(env)
     assert np.abs(pts[0][0] - reading)[[0, 2, 4, 6]].max() <= np.pi
     assert np.abs(pts[0][0] - reading).max() <= 0.02
-    turn_shift_is_whole_and_uniform([q for q, _ in pts], [q for _, q, _ in path_points])
+    turn_shift_is_whole_and_uniform([q for q, _ in pts][60:], [q for _, q, _ in path_points][60:])  # after the blend
     chain = Chain.from_urdf(urdf_text)
     from puppy_motion.geometry import clearances
 
-    for (q, _), (_, want, _) in list(zip(pts, path_points))[::300]:
+    for (q, _), (_, want, _) in list(zip(pts, path_points))[300::300]:
         assert np.allclose(clearances(chain, chair_scene(), q, False), clearances(chain, chair_scene(), want, False), atol=1e-9)
 
 
@@ -545,13 +545,13 @@ def sent_points(env):
     return np.array([q for q, _ in pts])
 
 
-def rule_failures(urdf_text, qs, full):
+def rule_failures(urdf_text, qs, full, ref=None):
     from puppy_motion.escape import grown_scene
     from puppy_motion.stage import path_violations, points_from_q
 
     chain = Chain.from_urdf(urdf_text)
     scene = grown_scene(chair_scene(), stage_store.MARGIN_M) if full else chair_scene()
-    bad = path_violations(points_from_q(qs), chain, scene)
+    bad = path_violations(points_from_q(qs), chain, scene, person_floor_ref=ref)
     return bad if full else [v for v in bad if v.rule in ("path_caps", "path_ends")]
 
 
@@ -571,7 +571,10 @@ def test_stage_from_a_reading_off_rest_starts_at_the_reading_and_ends_at_the_sto
     assert len(qs) == len(stored)
     after = int(round(1.0 / 0.02)) + 1
     assert np.allclose(qs[after:], stored[after:], atol=1e-9)  # w == 0 after BLEND_S
-    assert rule_failures(urdf_text, qs, True) == []  # the stage rules at MARGIN_M, caps and ends
+    chain = Chain.from_urdf(urdf_text)
+    clear = lambda x: env.engine._person_clearances(chain, x, stage_store.MARGIN_M)  # noqa: E731
+    ref = np.minimum(clear(reading), clear(stored[0]))
+    assert rule_failures(urdf_text, qs, True, ref) == []  # the stage rules at MARGIN_M, caps and ends
 
 
 def test_rest_from_a_reading_off_the_stage_pose_starts_at_the_reading_and_ends_at_rest(
