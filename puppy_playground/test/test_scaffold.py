@@ -32,7 +32,7 @@ def ros():
     rclpy.shutdown()
 
 
-def test_express_fails_not_yet_and_the_driver_gets_no_goals(ros):
+def test_express_without_a_name_fails_and_the_driver_gets_no_goals(ros):
     fake = FakeDriver()
     client_node = Node("playground_test_client")
     engine = PuppyPlayground(parameter_overrides=[Parameter("use_orchestrator", value=False)])
@@ -51,7 +51,7 @@ def test_express_fails_not_yet_and_the_driver_gets_no_goals(ros):
         wait_until(result.done)
         res = result.result().result.result
         assert res.status == Result.STATUS_FAILED
-        assert res.error_code == "not_yet"
+        assert res.error_code == "unknown_expression"
         assert sum(len(g) for g in fake.goals.values()) == 0
     finally:
         client.destroy()
