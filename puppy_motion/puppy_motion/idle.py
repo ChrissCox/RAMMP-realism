@@ -5,6 +5,8 @@ Calm is the hub: curious and playful moods return to it, and sleepy (droop, then
 only offered after SLEEPY_AFTER_S without a request. `size` multiplies every contribution's head and
 joints before composing (the playground's size slider). Nothing here talks to a robot."""
 
+from collections import deque
+
 import numpy as np
 
 from . import behaviors as B
@@ -19,6 +21,7 @@ MOODS = ("calm", "curious", "playful", "sleepy")
 DWELL_S = {"calm": (20.0, 60.0), "curious": (15.0, 40.0), "playful": (10.0, 25.0)}
 PAUSE_S = (1.0, 6.0)
 SLEEPY_AFTER_S = 180.0
+LOG_MAX = 200  # the director's log keeps the latest entries (auto mode runs unattended for hours)
 NEAR_USER_M = 0.35
 MOVED_RAD = 1e-3  # a beat that moves less than this was refused down to nothing
 T_ON = 0.3
@@ -97,7 +100,7 @@ class IdleDirector:
         self.size = float(size)
         self.rng = np.random.default_rng(seed)
         self.mood = "calm"
-        self.log = []
+        self.log = deque(maxlen=LOG_MAX)
         self._mood_end = None
         self._last_request = None
         self._last_sleep = -np.inf

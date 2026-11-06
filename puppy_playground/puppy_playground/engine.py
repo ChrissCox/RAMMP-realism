@@ -1,5 +1,5 @@
 """Puppy Playground engine: plan_stage, stage, rest and recover move the arm only along paths the
-puppy_motion rules approve; express, combo and auto are not implemented yet (Task 6).
+puppy_motion rules approve; express, combo and auto (motion.py) play beats through the one checked pipeline (pipeline.py).
 
 Safety shape: plan_stage plans and writes a candidate and never moves the arm. stage and rest replay
 the APPROVED file only (the operator copies the candidate over it), after the file passes the path
@@ -24,7 +24,7 @@ from puppy_motion.track import DT, Zone
 from puppy_motion.urdf import Chain
 from puppy_motion.validate import Violation, check_beat
 
-from . import stage_store
+from . import motion, stage_store
 
 STILL_RAD_S = 0.02  # every |dq| must be below this to start a move
 AT_TOL_RAD = 0.02  # "at" a path sample
@@ -51,23 +51,17 @@ class PuppyPlayground(CapabilityEngine):
         Action(
             "express",
             "Play one expressive behavior",
-            params_schema=_schema(
-                behavior={"type": "string"},
-                size=_SIZE,
-                intensity={"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0},
-            ),
+            params_schema=_schema(name={"type": "string"}, size=_SIZE),
         ),
         Action(
             "combo",
             "Play a sequence of behaviors",
-            params_schema=_schema(
-                behaviors={"type": "array", "items": {"type": "string"}}, size=_SIZE
-            ),
+            params_schema=_schema(names={"type": "array", "items": {"type": "string"}}, size=_SIZE),
         ),
         Action(
             "auto",
             "Play behaviors on its own whenever the arm is idle",
-            params_schema=_schema(size=_SIZE, duration_s={"type": "number", "minimum": 0}),
+            params_schema=_schema(size=_SIZE, seed={"type": "integer", "default": 1}),
         ),
     ]
 
@@ -162,6 +156,9 @@ class PuppyPlayground(CapabilityEngine):
     def execute(self, action_id, params, ctx):
         handler = {
             "plan_stage": self._plan_stage, "stage": self._stage, "rest": self._rest, "recover": self._recover,
+            "express": lambda c, r: motion.express(self, c, r),
+            "combo": lambda c, r: motion.combo(self, c, r),
+            "auto": lambda c, r: motion.auto(self, c, r),
         }.get(action_id)
         if handler is None:
             raise EngineError("not_yet", f"{action_id} is not implemented yet")
