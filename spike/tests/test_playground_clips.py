@@ -34,7 +34,7 @@ def test_stage_still_exists_and_pose_meets_the_rules():
     assert q.shape == (7,)
     assert doc["urdf_sha256"] == hashlib.sha256(urdf_text().encode("utf-8")).hexdigest()
     assert doc["rules"].startswith("stage.py@")
-    assert np.allclose(q, stage_pose(), atol=1e-12)  # the first pose of find_stage_poses, seed 0
+    assert np.allclose(q, stage_pose(), atol=1e-12)  # the shipped pose is what the clips use
     assert stage.stage_violations(chain(), chair(), q) == []
 
 
@@ -88,3 +88,46 @@ def test_driver_model_overshoot_with_positions_and_velocities_is_within_the_chec
         ach = dynamics.achieved(track, ctl, sc)
         person, obstacle = _head_floor_margins(ach.q[:: 2], track.q[:: 2])
         assert person >= 0.0 and obstacle >= 0.0, (name, person, obstacle)
+
+
+def _candidate_file(tmp_path, mutate=None):
+    """A candidate written by stage_store.save from the repo's own path (optionally mutated)."""
+    from puppy_sim.clips.playground_common import stage_store
+
+    _, q_stage, points, _, _ = ps.plan()
+    points = [(t, q.copy(), dq.copy()) for t, q, dq in points]
+    if mutate:
+        mutate(points)
+    path = tmp_path / "stage_path.candidate.json"
+    stage_store().save(path, points, urdf_text(), q_stage, method="escape")
+    return path
+
+
+def test_candidate_file_renders_for_approval(tmp_path):
+    clip = ps.make_clip(_candidate_file(tmp_path))
+    assert "REVIEW FOR APPROVAL" in clip.title and "escape" in clip.title and "NOT APPROVABLE" not in clip.title
+    assert clip.candidate.violations == []
+    track = clip.build()
+    assert track.log[-1].startswith("path by candidate file")
+    assert "NOT APPROVABLE" not in " ".join(clip.subtitle_for([track]))
+
+
+def test_candidate_with_a_violating_path_is_not_approvable(tmp_path):
+    def into_the_person(points):  # swing the middle of the path far from the planned route
+        mid = len(points) // 2
+        t, q, dq = points[mid]
+        points[mid] = (t, q + 1.5, dq)
+
+    clip = ps.make_clip(_candidate_file(tmp_path, into_the_person))
+    assert "NOT APPROVABLE" in clip.title and "REVIEW FOR APPROVAL" not in clip.title
+    assert clip.candidate.violations
+    assert "NOT APPROVABLE" in " ".join(clip.subtitle_for([clip.build()]))
+
+
+def test_unreadable_candidate_is_not_approvable(tmp_path):
+    bad = tmp_path / "x.json"
+    bad.write_text("{}")
+    clip = ps.make_clip(bad)
+    assert "NOT APPROVABLE" in clip.title
+    with pytest.raises(ValueError):
+        clip.build()

@@ -2,12 +2,15 @@
 from puppy_motion's beats and paths (the q arrays only; the spike's Track and renderer play them).
 
 Nothing here talks to a robot. The previews are what the user approves before the real arm moves:
-the stage pose (first of stage.find_stage_poses, seed 0), the candidate rest->stage path
+the stage pose (stage_pose.json), the candidate rest->stage path
 (escape.escape_path), every idle expression, and auto mode."""
 
 import hashlib
+import importlib.util
 import json
+import os
 import pickle
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -58,9 +61,12 @@ def chair():
 
 
 def stage_pose(ch=None, chair_scene=None):
-    """The first pose find_stage_poses returns for seed 0."""
+    """The shipped stage pose (puppy_playground's stage_pose.json: the first find_stage_poses pose,
+    seed 0, that has a checked escape path); the first find_stage_poses pose if there is no file."""
     from puppy_motion import stage
 
+    if STAGE_POSE_JSON.exists():
+        return np.array(json.loads(STAGE_POSE_JSON.read_text())["q"], dtype=float)
     return stage.find_stage_poses(ch or chain(), chair_scene or chair(), 1, SEED)[0]
 
 
@@ -169,3 +175,58 @@ def zone_of(beat):
 
 def settings_json():
     return json.loads(STAGE_POSE_JSON.read_text()) if STAGE_POSE_JSON.exists() else None
+
+
+# ------------------------------------------------------------ the robot's stage-path candidate
+CANDIDATE_ENV = "PLAYGROUND_CANDIDATE"
+STORE_PY = Path(__file__).resolve().parents[3] / "puppy_playground" / "puppy_playground" / "stage_store.py"
+
+
+def candidate_env():
+    """The candidate file named by PLAYGROUND_CANDIDATE, or None."""
+    return os.environ.get(CANDIDATE_ENV) or None
+
+
+def stage_store():
+    """puppy_playground's stage_store, loaded from its file (the spike does not install the package)."""
+    spec = importlib.util.spec_from_file_location("_pp_stage_store", STORE_PY)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@dataclass
+class Candidate:
+    """A stage_path.candidate.json read with stage_store.load (same format, URDF and endpoint checks)
+    and re-checked against the chair scene grown by the engine's margin. error: why it could not be
+    read (then the other fields are empty); violations: 'rule: detail' lines, none to be approvable."""
+
+    path: str
+    method: str = ""
+    points: list = None
+    duration: float = 0.0
+    margin_m: float = 0.0
+    violations: list = None
+    error: str = ""
+
+    @property
+    def approvable(self):
+        return not self.error and not self.violations
+
+
+def load_candidate(path):
+    from puppy_motion import escape, stage
+
+    store = stage_store()
+    cand = Candidate(str(path), points=[], violations=[])
+    ch, sc = chain(), chair()
+    try:
+        sp = store.load(path, urdf_text(), stage_pose(ch, sc), ch)
+    except store.StageStoreError as e:
+        cand.error = f"{e.code}: {e}"
+        return cand
+    cand.method, cand.points, cand.margin_m = sp.method or "unlabelled", sp.points, sp.margin_m
+    cand.duration = float(sp.points[-1][0])
+    grown = escape.grown_scene(sc, max(sp.margin_m, store.MARGIN_M))
+    cand.violations = [f"{v.rule}: {v.detail}" for v in stage.path_violations(sp.points, ch, grown)]
+    return cand

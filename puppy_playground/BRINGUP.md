@@ -70,20 +70,21 @@ sheppy up flatbot
 
 ## 4. Review the candidate in the simulator, then approve it
 
-On your PC, copy the candidate next to the repo and inspect it:
+On your PC, copy the candidate from snorlax (the data dir is `~/puppy-data`) and render exactly that
+file:
 
 ```
-scp <snorlax>:puppy-data/stage_path.candidate.json C:/Users/CHC785/orca/projects/RAMMP-realism/spike/media/stage_path.candidate.json
+scp snorlax@10.5.15.154:puppy-data/stage_path.candidate.json C:/Users/CHC785/orca/projects/RAMMP-realism/spike/media/stage_path.candidate.json
 cd C:/Users/CHC785/orca/projects/RAMMP-realism/spike
-.venv/Scripts/python -m puppy_sim render playground_stage
+PLAYGROUND_CANDIDATE=media/stage_path.candidate.json .venv/Scripts/python -m puppy_sim render playground_stage
 ```
 
-Note: the `playground_stage` clip plays the repo's own reference path (`escape_path`, cached), not the
-candidate file itself. Check the file's `"method"` (`curobo`, `min_jerk` or `escape`) and that it is
-the one you expect; the engine has already refused any path that breaks the stage-path rules, and
-re-checks the approved file again before every Stage and Rest. If the candidate's method is not
-`escape`, the clip is only a stand-in: look at the candidate's first and last samples against the
-clip and ask before approving.
+The clip plays the candidate file's own points, forward to the stage pose and back, on flatbot's chair
+boxes, and re-checks it with the engine's rules (chair scene grown by the file's margin). Approve ONLY
+if the title reads "Stage path candidate: <method>, <seconds> s - REVIEW FOR APPROVAL" and no
+violations are listed. A title with "NOT APPROVABLE" (violations, or a file that cannot be read) means
+do not approve. Without `PLAYGROUND_CANDIDATE` the clip shows the simulated plan, labelled "not the
+robot's candidate", which is not what the arm will replay.
 
 To approve, on snorlax:
 

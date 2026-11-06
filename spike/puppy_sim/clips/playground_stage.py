@@ -1,8 +1,9 @@
 """The playground's stage pose and the candidate path to it, on flatbot's empty chair.
 
-Rest, then the candidate path (escape.escape_path: climb out of the occupant keep-out, blend to the
-stage pose, retimed to the FREE caps), a hold at the stage pose, and the same path back. The path
-is a CANDIDATE for the user to approve; nothing here moves a robot.
+Rest, then the path (escape.escape_path: climb out of the occupant keep-out, blend to the stage
+pose, retimed to the FREE caps), a hold at the stage pose, and the same path back. With
+PLAYGROUND_CANDIDATE=<stage_path.candidate.json> it plays that file (what plan_stage wrote) instead,
+titled REVIEW FOR APPROVAL or NOT APPROVABLE. Nothing here moves a robot.
 
 `python -m puppy_sim.clips.playground_stage` writes media/playground_stage_pose.png (the still) and
 puppy_playground/puppy_playground/data/stage_pose.json."""
@@ -23,8 +24,10 @@ from .playground_common import (
     STAGE_POSE_JSON,
     Assembler,
     cached,
+    candidate_env,
     chain,
     chair,
+    load_candidate,
     points_q,
     stage_pose,
     urdf_text,
@@ -32,7 +35,8 @@ from .playground_common import (
 
 HOLD_S = 2.5
 STILL_PATH = render.MEDIA_DIR / "playground_stage_pose.png"
-CHIP_PATH = "CANDIDATE PATH, NOT APPROVED"
+CHIP_PATH = "SIMULATED PLAN, NOT APPROVED"
+CHIP_CANDIDATE = "ROBOT CANDIDATE PATH"
 
 
 def plan():
@@ -46,19 +50,25 @@ def plan():
             from puppy_motion import escape
 
             points, how = escape.escape_path(ch, sc, stage.REST_Q, q_stage), "escape_path"
-        except Exception as e:  # no escape module yet, or it found no route: the plain joint-space path
+        except ValueError as e:  # escape_path's no-route error: the plain joint-space path
             first = stage.min_jerk_path(stage.REST_Q, q_stage, 8.0)
             points, how = stage.retime_path(first, ch), f"min_jerk_path (escape_path: {type(e).__name__}: {e})"
         found = stage.path_violations(points, ch, sc)
         return stage.REST_Q.copy(), q_stage, points, how, [f"{v.rule}: {v.detail}" for v in found]
 
-    return cached("playground_stage_plan", make)
+    return cached(f"playground_stage_plan|{stage_pose(chain(), chair()).tobytes().hex()}", make)
 
 
-def build():
-    q_rest, q_stage, points, how, found = plan()
+def build(candidate=None):
+    """The simulated plan, or (candidate: a playground_common.Candidate) the robot's candidate file."""
+    if candidate is not None:
+        if candidate.error:
+            raise ValueError(f"cannot render {candidate.path}: {candidate.error}")
+        q_rest, points, how, label = candidate.points[0][1], candidate.points, f"candidate file ({candidate.method})", CHIP_CANDIDATE
+    else:
+        q_rest, _, points, how, _ = plan()
+        label = CHIP_PATH
     path = points_q(points)
-    label = CHIP_PATH
     a = Assembler(q_rest)
     a.hold(1.0, phase="rest")
     a.add(path, chip=label, phase="rest to stage")
@@ -70,27 +80,55 @@ def build():
     return track
 
 
+def candidate_title(c):
+    if c.error:
+        return "Stage path candidate: UNREADABLE - NOT APPROVABLE"
+    verdict = "REVIEW FOR APPROVAL" if c.approvable else "NOT APPROVABLE"
+    return f"Stage path candidate: {c.method}, {c.duration:.1f} s - {verdict}"
+
+
+def candidate_subtitle(c):
+    if c.error:
+        return [f"NOT APPROVABLE: {c.error[:90]}", c.path[-90:]]
+    if c.approvable:
+        verdict = "no stage-path violations (grown by the engine's margin)"
+    else:
+        verdict = f"NOT APPROVABLE: {len(c.violations)} violation(s), first {c.violations[0][:50]}"
+    return [f"the candidate file itself, forward then back; {LEGEND}", verdict]
+
+
 @dataclass(frozen=True)
 class StageClip(Clip):
+    candidate: object = None
+
     def subtitle_for(self, tracks):
+        if self.candidate is not None:
+            return candidate_subtitle(self.candidate)
         _, _, points, how, found = plan()
         kind = "escape_path" if how == "escape_path" else "min_jerk_path (escape_path found no route)"
-        verdict = f"breaks {len(found)} stage-path rule(s): {found[0][:60]}" if found else "meets every stage-path rule"
+        verdict = f"breaks {len(found)} rule(s), e.g. {found[0].split(':')[0]}" if found else "meets every stage-path rule"
         return [
-            f"stage pose = first of find_stage_poses (seed 0); path by {kind}, {points[-1][0]:.0f} s each way",
+            f"simulated plan, not the robot's candidate: path by {kind}, {points[-1][0]:.0f} s each way",
             f"{LEGEND}",
-            f"Candidate path, not approved: {verdict}",
+            f"Not approved: {verdict}",
         ]
 
 
-CLIP = StageClip(
-    name="playground_stage",
-    title="Playground stage pose and candidate path",
-    subtitle="",
-    camera="playground_wide",
-    build=build,
-    run=FLATBOT,
-)
+def make_clip(candidate_path=None):
+    """The clip for the simulated plan, or for the candidate file at candidate_path."""
+    cand = load_candidate(candidate_path) if candidate_path else None
+    return StageClip(
+        name="playground_stage",
+        title=candidate_title(cand) if cand else "Playground stage pose and candidate path",
+        subtitle="",
+        camera="playground_wide",
+        build=(lambda: build(cand)) if cand else build,
+        run=FLATBOT,
+        candidate=cand,
+    )
+
+
+CLIP = make_clip(candidate_env())
 
 
 # ------------------------------------------------------------------------------- the still
@@ -133,6 +171,8 @@ def write_stage_pose_json(path=STAGE_POSE_JSON):
         "urdf_sha256": hashlib.sha256(urdf_text().encode("utf-8")).hexdigest(),
         "rules": f"stage.py@{commit}",
     }
+    if STAGE_POSE_JSON.exists():  # keep the generator's search_index
+        doc.update({k: v for k, v in json.loads(STAGE_POSE_JSON.read_text()).items() if k == "search_index"})
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     return doc
