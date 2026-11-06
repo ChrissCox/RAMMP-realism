@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import rclpy
 from capability_engine.arm import HALTED, IMPEDANCE, POSITION, PREEMPTED, QUEUE, ArmInterface
-from capability_engine.driver_state import ControlTaken, EStopped
+from capability_engine.driver_state import ArmError, ControlTaken, EStopped
 from capability_engine.engine import Cancelled
 from fake_driver import FLATBOT_URDF, FakeCtx, FakeDriver
 from rammp_arm import IMPEDANCE as IMPEDANCE_PARAMS
@@ -26,7 +26,7 @@ from rosidl_runtime_py.convert import message_to_ordereddict
 from puppy_mode_ros.player import Player
 from puppy_mode_ros.proxies import PuppyArm, PuppyCtx
 from puppy_motion.beat import Beat, to_points
-from puppy_motion.director import AfterMove, BeforeMove, Phase
+from puppy_motion.director import AfterMove, BeforeMove, Failed, Phase
 from puppy_motion.geometry import Box, Scene
 from puppy_motion.track import DT, Zone
 from puppy_motion.urdf import Chain
@@ -414,3 +414,172 @@ def test_ctx_proxy_forwards_progress_first_then_emits_phase():
     assert ctx.progress("approach", 0.5, "go") == "r"
     assert order == [("progress", "approach", 0.5, "go", True), ("event", Phase("approach", "go"))]
     assert ctx.marker == 7 and ctx.checkpoint() == "ok"
+
+
+# -- the review's fixes ------------------------------------------------------------------------
+
+
+class Counting(Arm):
+    """The real arm; `change(js, n)` edits the n-th joint_states() reading (1-based)."""
+
+    def __init__(self, arm, change):
+        super().__init__(arm, None)
+        self.n, self._nchange = 0, change
+
+    def joint_states(self):
+        self.n += 1
+        return self._nchange(self._arm.joint_states(), self.n)
+
+
+def on_before_move(beats):
+    return lambda e: list(beats) if isinstance(e, BeforeMove) else []
+
+
+def test_a_tolerance_abort_of_the_task_move_disables_all_beats(env):
+    director = StubDirector(beats=lambda e: [make_beat()])
+    player, puppy = env.build(director)
+    env.fake.set_result("go_to_joint_config", -4)
+    director.beats = lambda e: []  # nothing at BeforeMove
+    assert puppy.go_to_joint_config(START) is False  # the task's result passes through unchanged
+    assert player.disabled
+    assert director.events == [BeforeMove(False)]  # no AfterMove
+    director.beats = lambda e: [make_beat()]
+    player.emit(Failed(True))
+    assert not goals(env)
+
+
+def test_a_false_return_or_an_exception_from_the_task_move_disables(env):
+    player, puppy = env.build()
+    with pytest.raises(Exception):
+        puppy.go_to_joint_config(START, gains="no such profile")
+    assert player.disabled
+    player, puppy = env.build()
+    result = puppy.execute_joint_trajectory(list(JOINTS), [(0.0, START, np.zeros(7)), (1.0, START, np.zeros(7))])
+    assert result.error_code == 0 and not player.disabled
+    env.fake.set_result(EXECUTE, -5)
+    result = puppy.execute_joint_trajectory(list(JOINTS), [(0.0, START, np.zeros(7)), (1.0, START, np.zeros(7))])
+    assert result.error_code == -5 and player.disabled
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        Beat("empty", "m", [], Zone.FREE),
+        Beat("eight", "m", [(0.0, np.zeros(8), np.zeros(8)), (1.0, np.zeros(8), np.zeros(8))], Zone.FREE),
+    ],
+    ids=["no-points", "eight-joints"],
+)
+def test_a_malformed_beat_never_stops_the_task_call(env, bad):
+    player, puppy = env.build(StubDirector(beats=on_before_move([bad])))
+    assert puppy.go_to_joint_config(START)
+    assert player.disabled and not goals(env)
+    assert len(env.fake.goals["go_to_joint_config"]) == 1
+
+
+def test_a_raising_held_never_stops_the_task_call(env):
+    calls = []
+
+    def held():
+        calls.append(1)
+        if len(calls) > 1:
+            raise ArmError("gripper_state is stale")
+        return False
+
+    player, puppy = env.build(StubDirector(beats=on_before_move([make_beat()])), held=held)
+    assert puppy.go_to_joint_config(START)
+    assert player.disabled and not goals(env)
+    assert len(env.fake.goals["go_to_joint_config"]) == 1
+
+
+def test_a_reading_that_moved_before_the_send_skips_the_beat(env):
+    def shift(js, n):
+        if n == 2:  # the re-read just before the send
+            js.position = js.position.copy()
+            js.position[0] += 0.01
+        return js
+
+    player, _ = env.build(real_arm=Counting(env.arm, shift))
+    player.play([make_beat()])
+    assert not goals(env) and not player.disabled
+    assert any("moved" in line for line in env.logs)
+
+
+def test_an_old_reading_at_the_send_skips_the_beat(env):
+    def old(js, n):
+        if n == 2:
+            js.age_s = 0.4
+        return js
+
+    player, _ = env.build(real_arm=Counting(env.arm, old))
+    player.play([make_beat()])
+    assert not goals(env)
+
+
+def test_the_arm_settles_after_a_beat_before_the_next_one(env):
+    def shaking(js, n):
+        if 3 <= n <= 6:  # n = 1, 2 are the checks; 3.. the settle wait
+            js.velocity = np.full(7, 0.05)
+        return js
+
+    player, _ = env.build(real_arm=Counting(env.arm, shaking))
+    player.play([make_beat(), make_beat(name="second")])
+    assert len(goals(env)) == 2
+
+
+def test_an_arm_that_never_settles_skips_the_next_beat(env):
+    def shaking(js, n):
+        if n >= 3:
+            js.velocity = np.full(7, 0.05)
+        return js
+
+    player, _ = env.build(real_arm=Counting(env.arm, shaking))
+    started = time.monotonic()
+    player.play([make_beat(), make_beat(name="second")])
+    assert len(goals(env)) == 1 and not player.disabled
+    assert 0.9 < time.monotonic() - started < 6.0
+
+
+def test_after_move_waits_for_rest_only_if_a_rule_could_fire(env):
+    quiet = StubDirector()
+    quiet.rules, quiet.min_keep = [SimpleNamespace(event="AfterMove", keep=3)], 6
+    arm = Counting(env.arm, lambda js, n: js)
+    player, _ = env.build(quiet, real_arm=arm)
+    player.emit(AfterMove())
+    assert arm.n == 1  # one read for q_now, no settle wait
+    loud = StubDirector()
+    loud.rules, loud.min_keep = [SimpleNamespace(event="AfterMove", keep=7)], 6
+    arm = Counting(env.arm, lambda js, n: js)
+    player, _ = env.build(loud, real_arm=arm)
+    player.emit(AfterMove())
+    assert arm.n >= 4  # 3 still reads, then q_now
+
+
+def test_the_latest_phase_that_arrived_during_a_move_reaches_the_director(env):
+    director = StubDirector()
+    player, _ = env.build(director)
+    player.move_started()
+    player.emit(Phase("a", "1"))
+    player.emit(Phase("b", "2"))
+    player.move_ended()
+    assert director.events == []
+    player.emit(AfterMove())
+    assert director.events == [Phase("b", "2"), AfterMove()]
+
+
+def test_geometry_can_make_a_beat_near_user(env, monkeypatch):
+    from puppy_mode_ros import player as player_module
+
+    monkeypatch.setattr(player_module, "zone_at", lambda *a, **k: Zone.NEAR_USER)
+    player, puppy = env.build()
+    assert puppy.go_to_joint_config(START)  # POSITION
+    player.play([make_beat(Zone.FREE)])
+    (g,) = goals(env)
+    assert g.control_mode == IMPEDANCE
+
+
+def test_a_beat_that_meets_an_estop_leaves_the_task_call_its_own_contract(env):
+    player, puppy = env.build(StubDirector(beats=on_before_move([make_beat()])))
+    env.fake.engage_estop()
+    time.sleep(SETTLE_S)
+    assert puppy.go_to_joint_config(START) is False  # as on the bare arm, not an EStopped
+    assert player.disabled

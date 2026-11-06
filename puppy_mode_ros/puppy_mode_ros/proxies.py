@@ -11,14 +11,18 @@ move_joints / move_cartesian `impedance=` (a dict means IMPEDANCE with those gai
 POSITION). `stream()` marks a stream open until its block exits, and no beat plays meanwhile.
 Every other attribute is the real arm's.
 
-Neither proxy changes what a call returns or raises, or the arguments it forwards.
+Neither proxy changes what a call returns or raises, or the arguments it forwards. A move that
+fails (False, a non-zero driver code, any exception) disables the player and emits no AfterMove.
 """
 
 import contextlib
 import functools
 import inspect
 
+import numpy as np
+
 from capability_engine.arm import GAIN_KEYS, IMPEDANCE, POSITION
+from capability_engine.driver_state import ArmError, EStopped
 
 from puppy_motion.director import AfterMove, BeforeMove, Phase  # noqa: F401  (BeforeMove: see Player)
 
@@ -52,6 +56,14 @@ class PuppyCtx:
         return getattr(self._ctx, name)
 
 
+def failed(result):
+    """Whether a move call's result says the move failed: False, or a driver result with a code."""
+    if result is False:
+        return True
+    code = getattr(result, "error_code", 0)
+    return isinstance(code, (int, np.integer)) and code != 0
+
+
 def mode_of(call, arm_method, args, kwargs):
     """(control_mode, gains) a move call asks for."""
     try:
@@ -79,15 +91,29 @@ class PuppyArm:
 
         @functools.wraps(method)
         def move(*args, **kwargs):
-            player.before_move()
+            # An e-stop met by a beat is the task call's to report, under its own contract (the
+            # _rammp methods return False): disable and forward the call.
+            try:
+                player.before_move()
+            except EStopped as e:
+                player.fail_move(f"e-stopped before the move: {e}")
             mode, gains = mode_of(call, method, args, kwargs)
             player.move_started()
             try:
                 result = method(*args, **kwargs)
+            except BaseException as e:
+                player.fail_move(f"{type(e).__name__}: {e}")
+                raise
             finally:
                 player.move_ended()
+            if failed(result):  # False, or a driver code: possible contact; no AfterMove, no beats
+                player.fail_move(f"{call} returned {result!r}")
+                return result
             player.record(mode, gains)
-            player.after_move()
+            try:
+                player.after_move()
+            except EStopped as e:
+                player.fail_move(f"e-stopped after the move: {e}")
             return result
 
         return move
@@ -98,6 +124,9 @@ class PuppyArm:
         try:
             with self._arm.stream(*args, **kwargs) as stream:
                 yield stream
+        except ArmError as e:  # the stream failed or was closed on us: no beats after it
+            self._player.fail_move(f"stream: {type(e).__name__}: {e}")
+            raise
         finally:
             self._player.stream_closed()
 
