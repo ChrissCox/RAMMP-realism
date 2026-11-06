@@ -21,7 +21,7 @@ from rammp_arm_interfaces.msg import ImpedanceGains
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.serialization import serialize_message
+from rosidl_runtime_py.convert import message_to_ordereddict
 
 from puppy_mode_ros.player import Player
 from puppy_mode_ros.proxies import PuppyArm, PuppyCtx
@@ -126,7 +126,7 @@ def serialized(fake):
         for goal in items:
             goal = copy.copy(goal)
             goal.sender_id = ""
-            out.setdefault(name, []).append(serialize_message(goal))
+            out.setdefault(name, []).append(dict(message_to_ordereddict(goal)))
     return out
 
 
