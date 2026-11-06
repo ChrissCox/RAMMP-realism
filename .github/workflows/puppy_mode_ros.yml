@@ -1,0 +1,36 @@
+name: puppy-mode-ros
+on:
+  push:
+    branches: ["feature/**"]
+  pull_request:
+    paths:
+      - "puppy_mode_ros/**"
+      - "puppy_motion/**"
+      - "docker/ros-test.Dockerfile"
+      - ".github/workflows/puppy_mode_ros.yml"
+jobs:
+  pytest:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # The same x86 test image as ros-tests (capability_engine at c3989c6 + fake_driver.py).
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/ros-test.Dockerfile
+          load: true
+          tags: puppy-ros-test:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: pytest puppy_mode_ros (against the installed puppy_motion)
+        run: |
+          docker run --rm -v "$PWD":/repo puppy-ros-test:ci bash -c '
+            set -e
+            python3 -m pip install --upgrade "pip==24.3.1"
+            python3 -m pip install /repo/puppy_motion
+            python3 -m pip show puppy-motion
+            export PYTHONPATH="$PYTHONPATH:/repo/puppy_mode_ros"
+            cd /repo && python3 -m pytest puppy_mode_ros/test -q
+          '

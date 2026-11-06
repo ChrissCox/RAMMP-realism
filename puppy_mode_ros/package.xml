@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>puppy_mode_ros</name>
+  <version>0.1.0</version>
+  <description>Puppy Mode: an off-by-default hook that adds expressive motion to a RAMMP capability engine</description>
+  <maintainer email="chrisscox@users.noreply.github.com">Chris Cox</maintainer>
+  <license>Proprietary</license>
+
+  <exec_depend>capability_engine</exec_depend>
+  <exec_depend>rammp_arm_interfaces</exec_depend>
+  <exec_depend>rammp_orchestrator_interfaces</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
