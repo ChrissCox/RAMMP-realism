@@ -150,3 +150,24 @@ def test_spike_person_clearances_reproduced():
     for part, m in zip(PARTS, mins):
         # conservative: never more clearance than the spike's mesh, at most 0.04 m less
         assert SPIKE_MIN[part] - 0.04 <= m <= SPIKE_MIN[part] + 0.005, (part, m, SPIKE_MIN[part])
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity"])
+def test_scene_param_rejects_non_finite_numbers(bad):
+    for group, shape in (("person", f'"spheres": [[0, 0, 0.2, {bad}]]'), ("obstacles", f'"boxes": [[0, {bad}, 0, 1, 1, 1]]')):
+        text = '{"person": {"spheres": [[0, 0, 0.2, 0.1]]}, "%s": {%s}}' % (group, shape)
+        if group == "person":
+            text = '{"person": {%s}}' % shape
+        with pytest.raises(ValueError):
+            Scene.from_param(text)
+
+
+def test_clearances_propagate_a_nan_distance(chain):
+    from puppy_motion.geometry import Sphere, clearances
+
+    q = np.zeros(7)
+    good = Sphere([0.5, 0.0, 0.5], 0.1)
+    for shapes in ([good, Sphere([0.0, 0.0, 0.0], float("nan"))], [Sphere([np.nan, 0, 0], 0.1), good]):
+        out = clearances(chain, Scene(shapes, shapes), q, False)
+        assert np.isnan(out).any()
+    assert np.isfinite(clearances(chain, Scene([good], []), q, False)[0]).all()

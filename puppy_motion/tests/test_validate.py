@@ -105,7 +105,7 @@ def test_dt(beat, home, chain, scene):
 def test_velocity_the_points_carry_must_agree_with_the_positions(beat, home, chain, scene):
     pts = _points(beat)
     k = int(2.0 / DT)
-    pts[k] = (pts[k][0], pts[k][1], pts[k][2] + 0.2)
+    pts[k] = (pts[k][0], pts[k][1], pts[k][2] + 0.02)
     assert _rules(pts, home, chain, scene) == ["velocity"]
 
 
@@ -317,3 +317,60 @@ def test_bad_arguments_are_shape_violations_not_exceptions(beat, home, chain, sc
     assert _rules(None, home, chain, scene) == ["shape"]
     assert _rules([(0.0, home)] * 3, home, chain, scene) == ["shape"]
     assert _rules([("a", home, home)] * 3, home, chain, scene) == ["shape"]
+
+
+# ------------------------------------------------------------- fix round 2
+def test_carried_velocity_must_equal_the_central_difference(home, chain, scene):
+    # a still arm whose joint-1 dq says +0.05 rad/s for 1 s: the driver would follow it
+    q = np.tile(home, (101, 1))
+    pts = _points(q)
+    for k in range(25, 75):
+        pts[k] = (pts[k][0], pts[k][1], pts[k][2] + np.eye(7)[0] * 0.05)
+    assert _rules(pts, home, chain, scene) == ["velocity"]
+    pts = _points(q)
+    pts[50] = (pts[50][0], pts[50][1], pts[50][2] + np.eye(7)[0] * 2e-6)
+    assert _rules(pts, home, chain, scene) == ["velocity"]  # 1e-6 rad/s is the whole tolerance
+
+
+def test_inflated_carried_velocity_on_an_excursion_is_refused(home, chain, scene):
+    # a joint-1 move at 0.99 of its 0.36 rad/s cap, its dq inflated by 0.05 rad/s where it moves
+    seconds = 4.0
+    q = _excursion(home, np.eye(7)[0] * 0.99 * 0.36 * seconds / np.pi, rest_s=0.5, seconds=seconds)
+    pts = _points(q)
+    assert [v.rule for v in check_beat(pts, home, chain, scene, Zone.FREE)] == []
+    inflated = [(t, qq, dq + np.eye(7)[0] * 0.05 * (np.abs(dq).max() > 0.01)) for t, qq, dq in _points(q)]
+    rules = _rules(inflated, home, chain, scene)
+    assert "velocity" in rules and "speed" in rules  # carried dq over the 0.36 cap too
+
+
+def test_forward_difference_velocities_are_refused(beat, home, chain, scene):
+    dq = np.vstack([np.diff(beat, axis=0) / DT, np.zeros((1, 7))])
+    pts = [(k * DT, beat[k], dq[k]) for k in range(len(beat))]
+    assert "velocity" in _rules(pts, home, chain, scene)  # only central differences are accepted
+
+
+def test_a_beat_that_stops_abruptly_is_refused_for_accel_at_its_last_sample(home, chain, scene):
+    ease = 0.5 * (1 - np.cos(np.pi * np.arange(1, 41) / 40))  # a gentle start over 0.8 s, then 0.04 rad/s
+    step = 0.04 * DT * np.concatenate([ease, np.ones(10)])
+    q = np.tile(home, (len(step) + 1, 1))
+    q[1:, 6] += np.cumsum(step)
+    vs = check_beat(_points(q), home, chain, scene, Zone.NEAR_USER)
+    assert any(v.rule == "accel" and v.sample == len(q) - 1 for v in vs)
+
+
+def test_held_container_can_make_the_beat_near_the_user(home, chain, scene):
+    q0 = home + 0.5 * (Q_NEAR - home)  # head 0.3815 m from the person, 0.3474 m with the container
+    assert clearances(chain, scene, q0, False)[0, 3] >= 0.35 > clearances(chain, scene, q0, True)[0, 3]
+    track = constant_track(q0, REST_GRIP, BEAT_S, Zone.FREE)
+    ctx = Context.of(track, chain, scene, Targets(scene.person_head()))
+    q = compose(track, [B.shake_off(ctx, 0.5)], chain, scene).q
+    assert np.abs(q - q0).max() > 0.01
+    assert _rules(_points(q), q0, chain, scene, Zone.FREE) == []
+    assert set(_rules(_points(q), q0, chain, scene, Zone.FREE, held=True)) & {"speed", "accel"}
+
+
+def test_a_nan_shape_among_valid_ones_is_a_violation(beat, home, chain, scene):
+    nan_scene = Scene(list(scene.person) + [Sphere([0.0, 0.0, 0.0], np.nan)], [])
+    assert np.isnan(clearances(chain, nan_scene, home, False)[0]).any()
+    assert np.isfinite(clearances(chain, scene, home, False)[0]).all()
+    assert "person" in _rules(_points(beat), home, chain, nan_scene)  # (and the NaN head puts it in NEAR_USER)

@@ -8,9 +8,10 @@ points, so a sample-to-sample zig-zag shows in full (a central difference would 
 
 Velocity convention: the points carry CENTRAL-difference velocities, dq[i] = (q[i+1] - q[i-1]) / 2 DT,
 with the first and last exactly 0 (the driver interpolates between points, and central differences
-reproduce a constant acceleration). The `velocity` rule holds them to that within max joint accel *
-DT + VELOCITY_FLOOR (a smooth beat's central and forward differences differ by about that much);
-the speed and accel caps themselves stay on forward differences.
+reproduce a constant acceleration). The `velocity` rule holds them to that within
+VELOCITY_TOL = 1e-6 rad/s (producers compute them exactly, the driver feeds them forward), and each
+carried |dq| must itself be inside the effective zone's joint speed caps and the URDF limits. The
+speed and accel caps on the positions stay on forward differences.
 
 The zone is not trusted: whenever the head (with the held object when `held`) is under 0.35 m from
 the person at q_start, the stricter of the given zone and NEAR_USER applies.
@@ -34,7 +35,7 @@ from .track import DT, Zone
 REST_TOL = 1e-9  # first/last point equal q_start, and are at rest, within this (rad, rad/s)
 DT_TOL = 1e-9  # s, how far a time step may be from DT
 CAP_TOL = 1e-9  # a cap is broken when exceeded by more than this (float noise)
-VELOCITY_FLOOR = 0.01  # rad/s, on top of max joint accel * DT (see velocity_tol)
+VELOCITY_TOL = 1e-6  # rad/s: carried dq vs the central difference of q
 NEAR_USER_M = 0.35
 PERSON_SLACK_M = 0.005  # a part may come this much closer to the person than min(task, 0.35)
 OBSTACLE_KEEP_M = 0.03
@@ -63,11 +64,6 @@ def _worst(excess, what, first=0):
         return None
     i, j = np.unravel_index(np.argmax(excess), excess.shape)
     return int(i) + first, f"{what} column {int(j)}: over by {excess[i, j]:.6g}"
-
-
-def velocity_tol(limits):
-    """rad/s: how far a carried velocity may be from the central difference of the positions."""
-    return float(np.max(limits.joint_accel)) * DT + VELOCITY_FLOOR
 
 
 def check_beat(points, q_start, chain, scene, zone, caps=DEFAULT_CAPS, task_clearance=None, held=False):
@@ -140,10 +136,12 @@ def _check(points, q_start, chain, scene, zone, caps, task_clearance, held):
     v_rest = np.vstack([np.zeros((1, 7)), v, np.zeros((1, 7))])
     a = np.diff(v_rest, axis=0) / DT
     central = (q[2:] - q[:-2]) / (2.0 * DT)  # what the interior carried velocities must be
-    add("velocity", _worst(np.abs(dq[1:-1] - central) - velocity_tol(limits), "carried velocity vs central difference, joint", 1))
-    add("speed", _worst(np.abs(v) - limits.joint_speed - CAP_TOL, "joint speed"))
+    add("velocity", _worst(np.abs(dq[1:-1] - central) - VELOCITY_TOL, "carried velocity vs central difference, joint", 1))
+    over = np.maximum(np.abs(v), np.abs(dq[:-1])) - limits.joint_speed  # the step and the carried dq
+    add("speed", _worst(over - CAP_TOL, "joint speed (step or carried dq)"))
     add("accel", _worst(np.abs(a) - limits.joint_accel - CAP_TOL, "joint accel"))
-    add("urdf_speed", _worst(np.abs(v) - chain.vel_limits - CAP_TOL, "URDF velocity limit, joint"))
+    over = np.maximum(np.abs(v), np.abs(dq[:-1])) - chain.vel_limits
+    add("urdf_speed", _worst(over - CAP_TOL, "URDF velocity limit (step or carried dq), joint"))
 
     # head speed at the eye and tool points
     memo = {}

@@ -142,6 +142,10 @@ class Scene:
         try:
             person = _shapes(data.get("person"))
             obstacles = _shapes(data.get("obstacles"))
+            for shape in person + obstacles:
+                for value in vars(shape).values():
+                    if not np.all(np.isfinite(value)):
+                        raise ValueError(f"non-finite number in a {type(shape).__name__}")
         except (TypeError, ValueError, AttributeError, KeyError) as e:
             raise ValueError(f"malformed scene shapes: {e}")
         if not person:
@@ -172,12 +176,15 @@ def arm_capsules(chain, q, held):
 
 
 def clearances(chain, scene, q, held):
-    """(2, 4): row 0 distance to the person, row 1 to obstacles (+inf if none), per PARTS column."""
+    """(2, 4): row 0 distance to the person, row 1 to obstacles (+inf if none), per PARTS column.
+    A NaN distance (a malformed shape) gives a NaN clearance."""
     caps = arm_capsules(chain, q, held)
     out = np.full((2, len(PARTS)), np.inf)
     for j, part in enumerate(PARTS):
         for row, shapes in enumerate((scene.person, scene.obstacles)):
             for c in caps[part]:
                 for s in shapes:
-                    out[row, j] = min(out[row, j], distance(c, s))
+                    d = distance(c, s)
+                    # a NaN distance (a malformed shape) must not be dropped by min(): it propagates
+                    out[row, j] = np.nan if np.isnan(d) or np.isnan(out[row, j]) else min(out[row, j], d)
     return out
