@@ -70,7 +70,13 @@ def install(engine_cls):
         @functools.wraps(original_init)
         def __init__(self, *args, **kwargs):
             original_init(self, *args, **kwargs)
-            declare_params(self)
+            try:  # Puppy Mode must never stop the engine itself from starting
+                declare_params(self)
+            except Exception as error:  # noqa: BLE001
+                try:
+                    self.get_logger().warning(f"puppy.* parameters not declared ({error!r}); Puppy Mode stays off")
+                except Exception:  # noqa: BLE001
+                    pass
 
         __init__._puppy_wrapped = True
         engine_cls.__init__ = __init__
