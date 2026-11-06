@@ -40,7 +40,7 @@ var combo = [];
 var $ = function (id) { return document.getElementById(id); };
 function size() { return parseFloat($("size").value); }
 function post(path, body) {
-  return fetch(path, {method: "POST", body: JSON.stringify(body || {})}).then(function (r) {
+  return fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})}).then(function (r) {
     return r.json().then(function (j) { if (r.status == 409) j.busy = true; if (r.status >= 400) $("status").textContent = "error " + r.status + ": " + JSON.stringify(j); return j; });
   });
 }

@@ -1,10 +1,11 @@
 """Temporary testing UI: HTTP page + ROS wiring + the auto-mode supervisor.
 
-UiController and make_server are plain Python (tested with a fake backend); rclpy is imported only
-inside main().
+UiController, make_server and arm_moving are plain Python (tested with a fake backend); rclpy is
+imported only inside main().
 """
 
 import json
+import math
 import mimetypes
 import os
 import threading
@@ -12,7 +13,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from puppy_playground.supervisor import OWN_ID, Cancel, SendAuto, State, Supervisor
+from puppy_playground.supervisor import OWN_ID, STALE_S, Cancel, SendAuto, State, Supervisor
 
 # Keep in step with puppy_motion.idle.EXPRESSIONS (a test compares them).
 EXPRESSIONS = (
@@ -23,12 +24,36 @@ EXPRESSIONS = (
 SIZE_MIN, SIZE_MAX, SIZE_DEFAULT = 0.25, 1.0, 0.25
 SIMPLE = ("stage", "rest", "recover", "plan_stage")
 WEB_DIR = Path(__file__).resolve().parent / "web"
+CANCEL_RESEND_S = 0.3  # re-send cancel while an auto goal that should have stopped still runs
+STOP_WEDGE_S = 5.0  # after /stop, a goal with no result by then is forgotten
+
+ARM_JOINTS = tuple(f"arm_joint_{i}" for i in range(1, 8))  # the gripper joint is not an arm joint
+STILL_RATE = 0.02  # rad/s: every arm joint slower than this counts as still
+
+
+def arm_moving(names, velocities):
+    """True unless arm_joint_1..7 are all present with finite velocities below STILL_RATE. The
+    drivers list the gripper joint first with velocity NaN, so joints are picked by name."""
+    names = list(names)
+    velocities = list(velocities)
+    for joint in ARM_JOINTS:
+        if joint not in names:
+            return True
+        i = names.index(joint)
+        if i >= len(velocities):
+            return True
+        v = velocities[i]
+        if not math.isfinite(v) or abs(v) >= STILL_RATE:
+            return True
+    return False
 
 
 def _size(value):
     try:
         value = float(value)
     except (TypeError, ValueError):
+        value = SIZE_DEFAULT
+    if not math.isfinite(value):
         value = SIZE_DEFAULT
     return min(SIZE_MAX, max(SIZE_MIN, value))
 
@@ -42,10 +67,14 @@ class UiController:
         self.clock = clock
         self.lock = threading.RLock()
         self._active = None  # (token, kind)
+        self._sent_at = 0.0
         self._token = 0
         self._engine = {}  # the playground engine's last status JSON
-        self._estopped = False
+        self._engine_heard = None
+        self._estopped = True  # until /control_status arrives
         self._refusal = None
+        self._last_cancel = -1e9
+        self._stop_deadline = None
 
     # -- inputs from ROS ------------------------------------------------------
 
@@ -53,7 +82,21 @@ class UiController:
         with self.lock:
             if engine_id == OWN_ID:
                 self._engine = dict(full or {"state": state})
-            self._run(self.sup.engine_status(engine_id, state))
+                self._engine_heard = self.clock()
+            else:
+                self._run(self.sup.engine_status(engine_id, state))
+
+    def engine_discovered(self, engine_id):
+        with self.lock:
+            self.sup.engine_discovered(engine_id)
+
+    def forget(self, engine_id):
+        with self.lock:
+            self.sup.forget(engine_id)
+
+    def discovered(self):
+        with self.lock:
+            self.sup.discovered()
 
     def estopped(self, value):
         with self.lock:
@@ -66,16 +109,29 @@ class UiController:
 
     def tick(self):
         with self.lock:
-            cmd = self.sup.tick(self.clock())
+            now = self.clock()
+            cmd = self.sup.tick(now)
             self._run([cmd] if cmd else [])
+            if (
+                self._active is not None
+                and self._active[1] == "auto"
+                and self.sup.state is not State.PLAYING
+                and now - self._last_cancel >= CANCEL_RESEND_S
+                and self._own_goal_may_run()
+            ):
+                self._cancel()
+            if self._stop_deadline is not None and now >= self._stop_deadline:
+                self._stop_deadline = None
+                self._active = None  # wedged: no result after /stop
 
-    def goal_finished(self, token, ok, error_code="", message=""):
+    def goal_finished(self, token, ok, error_code="", message="", cancelled=False):
         with self.lock:
             if self._active is None or self._active[0] != token:
                 return  # stale
             kind = self._active[1]
             self._active = None
-            if not ok:
+            self._stop_deadline = None
+            if not ok and not cancelled:
                 self._refusal = {"action": kind, "error_code": error_code, "message": message}
             if kind == "auto":
                 self._run(self.sup.goal_done())
@@ -98,14 +154,21 @@ class UiController:
         with self.lock:
             name = path.strip("/")
             if name == "stop":
-                self.sup.toggle(False)  # Stop also turns auto off; the cancel below covers its goal
-                self.backend.control_cancel()
+                self.sup.toggle(False)  # Stop also turns auto off
+                ok = self._cancel()
+                self._stop_deadline = self.clock() + STOP_WEDGE_S
+                if not ok:
+                    return 503, {"error": "control service not ready; goal cancel sent if one is active"}
                 return 200, {"ok": True}
             if name == "auto":
-                if body.get("on"):
+                if body.get("on") is True:
+                    if self._active is not None and self._active[1] != "auto":
+                        return 409, {"error": "busy"}
                     self._run(self.sup.toggle(True, size=_size(body.get("size"))))
                 else:
                     self._run(self.sup.toggle(False))
+                    if self._active is not None and self._active[1] == "auto":
+                        self._cancel()
                 return 200, {"ok": True, "auto": self.sup.state.value}
             if name == "express":
                 expr = body.get("name")
@@ -113,7 +176,7 @@ class UiController:
                     return 400, {"error": "unknown expression"}
                 size = _size(body.get("size"))
                 if self.sup.state is State.PLAYING:
-                    self.backend.publish_request(expr, size)
+                    self.backend.publish_request(expr)  # the auto goal's size applies
                     return 200, {"ok": True, "queued": True}
                 return self._goal("express", {"name": expr, "size": size})
             if name == "combo":
@@ -127,6 +190,20 @@ class UiController:
 
     # -- internals ------------------------------------------------------------
 
+    def _own_goal_may_run(self):
+        """False only when the playground reported idle after the goal was sent."""
+        idle = self._engine.get("state") == "idle"
+        fresh = self._engine_heard is not None and self.clock() - self._engine_heard <= STALE_S
+        return not (idle and fresh and self._engine_heard >= self._sent_at)
+
+    def _cancel(self):
+        """Control CANCEL plus a cancel of the goal handle. -> whether Control was reachable."""
+        self._last_cancel = self.clock()
+        ok = self.backend.control_cancel()
+        if self._active is not None:
+            self.backend.cancel_goal(self._active[0])
+        return bool(ok)
+
     def _goal(self, kind, params):
         if self._active is not None or self.sup.state is not State.OFF:
             return 409, {"error": "busy"}
@@ -136,13 +213,14 @@ class UiController:
     def _send(self, kind, params):
         self._token += 1
         self._active = (self._token, kind)
+        self._sent_at = self.clock()
         self._refusal = None
         self.backend.send_goal(self._token, kind, params)
 
     def _run(self, commands):
         for cmd in commands:
             if isinstance(cmd, Cancel):
-                self.backend.control_cancel()
+                self._cancel()
             elif isinstance(cmd, SendAuto):
                 if self._active is not None:  # a cancelled goal has not ended yet: try again later
                     self._run(self.sup.goal_done())
@@ -185,6 +263,11 @@ def make_server(controller, port, web_dir=WEB_DIR, preview_dir=None, host="0.0.0
                 self._reply(404, {"error": "not found"})
 
         def do_POST(self):
+            # A cross-site form cannot send application/json without a CORS preflight (CSRF guard).
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype != "application/json":
+                self._reply(415, {"error": "Content-Type must be application/json"})
+                return
             try:
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n) or b"{}")
@@ -203,7 +286,6 @@ def make_server(controller, port, web_dir=WEB_DIR, preview_dir=None, host="0.0.0
 
 # -- ROS wiring ----------------------------------------------------------------
 
-STILL_RATE = 0.02  # rad/s: every joint slower than this counts as still
 JOINT_STALE_S = 0.5  # no joint_states for this long: the arm is not known to be still
 
 
@@ -217,8 +299,13 @@ def main(args=None):
     from rclpy.callback_groups import ReentrantCallbackGroup
     from rclpy.executors import MultiThreadedExecutor
     from rclpy.node import Node
+    from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
     from sensor_msgs.msg import JointState
     from std_msgs.msg import String
+
+    LATCHED = QoSProfile(
+        depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL
+    )
 
     class UiNode(Node):
         def __init__(self):
@@ -234,14 +321,19 @@ def main(args=None):
             )
             self._request_pub = self.create_publisher(String, "/puppy_playground/request", 10)
             self._status_subs = {}
+            self._ignored = set()
+            self._handles = {}
             self._moving_at = time.monotonic()
             self._last_joint = None
             self.controller = UiController(self, Supervisor(time.monotonic))
+            # /joint_states is published BEST_EFFORT (sensor data); /control_status is latched.
             self.create_subscription(
-                JointState, "/joint_states", self._on_joints, 10, callback_group=self._group
+                JointState, "/joint_states", self._on_joints, qos_profile_sensor_data,
+                callback_group=self._group,
             )
             self.create_subscription(
-                ControlStatus, "/control_status", self._on_control_status, 10, callback_group=self._group
+                ControlStatus, "/control_status", self._on_control_status, LATCHED,
+                callback_group=self._group,
             )
             self.create_timer(0.1, self._tick, callback_group=self._group)
             self.create_timer(2.0, self._discover, callback_group=self._group)
@@ -267,50 +359,74 @@ def main(args=None):
             if not handle.accepted:
                 self.controller.goal_finished(token, False, "rejected", "goal rejected by the engine")
                 return
+            self._handles[token] = handle
             handle.get_result_async().add_done_callback(lambda f, t=token: self._result(t, f))
 
         def _result(self, token, future):
+            self._handles.pop(token, None)
             r = future.result().result.result
-            ok = r.status == Result.STATUS_SUCCESS
-            self.controller.goal_finished(token, ok, r.error_code, r.payload_json)
+            message = getattr(r, "message", "") or getattr(r, "payload_json", "")
+            self.controller.goal_finished(
+                token,
+                r.status == Result.STATUS_SUCCESS,
+                r.error_code,
+                message,
+                cancelled=r.status == Result.STATUS_CANCELLED,
+            )
+
+        def cancel_goal(self, token):
+            handle = self._handles.get(token)
+            if handle is not None:
+                handle.cancel_goal_async()
 
         def control_cancel(self):
-            if self._control.service_is_ready():
-                self._control.call_async(Control.Request(command=Control.Request.CANCEL))
+            if not self._control.service_is_ready():
+                return False
+            self._control.call_async(Control.Request(command=Control.Request.CANCEL))
+            return True
 
-        def publish_request(self, name, size):
-            self._request_pub.publish(String(data=json.dumps({"name": name, "size": size})))
+        def publish_request(self, name):
+            self._request_pub.publish(String(data=name))
 
-        # subscriptions
+        # subscriptions: any "<anything>/status" String topic whose messages are capability_engine
+        # status JSON (a dict with "state"); other topics are dropped on their first message.
         def _discover(self):
             for topic, types in self.get_topic_names_and_types():
-                parts = topic.split("/")
-                if len(parts) == 3 and parts[2] == "status" and "std_msgs/msg/String" in types:
-                    if topic not in self._status_subs:
-                        self._status_subs[topic] = self.create_subscription(
-                            String,
-                            topic,
-                            lambda m, e=parts[1]: self._on_status(e, m),
-                            10,
-                            callback_group=self._group,
-                        )
+                if not topic.endswith("/status") or "std_msgs/msg/String" not in types:
+                    continue
+                if topic in self._status_subs:
+                    continue
+                engine_id = topic[1:-len("/status")] if topic.startswith("/") else topic[:-len("/status")]
+                if engine_id == "" or engine_id in self._ignored:
+                    continue
+                if engine_id.split("/")[-1] == OWN_ID:
+                    engine_id = OWN_ID
+                else:
+                    self.controller.engine_discovered(engine_id)
+                self._status_subs[topic] = self.create_subscription(
+                    String, topic, lambda m, e=engine_id: self._on_status(e, m), 10,
+                    callback_group=self._group,
+                )
+            self.controller.discovered()
 
         def _on_status(self, engine_id, msg):
             try:
                 data = json.loads(msg.data)
             except ValueError:
-                return
-            if isinstance(data, dict):
-                self.controller.engine_status(engine_id, str(data.get("state", "")), data)
+                data = None
+            if isinstance(data, dict) and "state" in data:
+                self.controller.engine_status(engine_id, str(data["state"]), data)
+            else:
+                self._ignored.add(engine_id)  # not a capability_engine status topic
+                self.controller.forget(engine_id)
 
         def _on_control_status(self, msg):
             self.controller.estopped(bool(msg.estopped))
 
         def _on_joints(self, msg):
             now = time.monotonic()
-            velocity = list(msg.velocity)
-            if not velocity or max(abs(v) for v in velocity) >= STILL_RATE:
-                self._moving_at = now  # no velocity data: never call the arm still
+            if arm_moving(msg.name, msg.velocity):
+                self._moving_at = now
             self._last_joint = now
 
         def _tick(self):
