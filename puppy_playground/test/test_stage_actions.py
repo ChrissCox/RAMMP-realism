@@ -341,7 +341,9 @@ def test_a_changed_approved_file_is_rechecked_after_a_cached_ok(env, urdf_text, 
     assert not env.fake.goals["execute_joint_trajectory"]
 
 
-KINOVA_HOME = np.deg2rad([0.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0])  # Kinova Home, in the engine's joint convention
+# Kinova Home is [0, 15, 180, 230, 0, 55, 90] deg; the pose the arm is actually parked at, near it, in the
+# engine's convention (limited joint 4 as -126.5, continuous joint 3 wrapped to (-pi, pi])
+KINOVA_HOME = np.deg2rad([11.7, -7.9, -176.2, -126.5, -17.0, 55.0, 90.0])
 
 
 def test_plan_stage_plans_from_a_kinova_home_like_start_and_stage_replays_it(env, urdf_text, stage_q):
@@ -372,7 +374,7 @@ def test_stage_refuses_from_elsewhere_than_the_approved_start(env, urdf_text, st
 
 def test_plan_stage_from_a_start_in_collision_refuses_bad_start_and_writes_nothing(env, monkeypatch):
     monkeypatch.setattr(
-        env.engine, "_obstacle_clearances", lambda chain, q, margin: np.array([0.0, 0.2, 0.2, 0.2])
+        env.engine, "_obstacle_clearances", lambda chain, q, margin: np.array([-0.01, 0.2, 0.2, 0.2])
     )
     env.at(HOME)
     res = env.run("plan_stage")

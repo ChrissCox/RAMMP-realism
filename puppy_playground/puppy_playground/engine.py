@@ -183,8 +183,8 @@ class PuppyPlayground(CapabilityEngine):
         obstacle = cls._obstacle_clearances(chain, q, stage_store.MARGIN_M)
         if not np.all(np.isfinite(obstacle)):
             return "the obstacle clearance is not finite"
-        if np.any(obstacle < stage_rules.OBSTACLE_KEEP_M - stage_rules.OBSTACLE_TOL_M):
-            return f"the arm is within {float(obstacle.min()):.3f} m of an obstacle"
+        if np.any(obstacle < 0.0):  # touching or inside an obstacle (the rest pose itself is ~2 cm off)
+            return f"the arm is in collision with an obstacle ({float(obstacle.min()):.3f} m)"
         return None
 
     def _load(self, path, urdf_text, chain, stage_q):
@@ -326,7 +326,7 @@ class PuppyPlayground(CapabilityEngine):
             raise EngineError("bad_start", f"plan_stage cannot plan from where the arm is: {why}", recoverable=True)
         target = q + shortest_delta(chain, q, stage_q)  # the stage pose on the turn nearest the reading
         tried, found = {}, None
-        for method in ("curobo", "min_jerk", "escape"):
+        for method in ("curobo", "min_jerk", "escape", "via"):
             ctx.checkpoint()
             try:
                 points = self._candidate_points(method, chain, q, target, rec)
@@ -377,7 +377,41 @@ class PuppyPlayground(CapabilityEngine):
         if method == "min_jerk":
             seconds = max(2.0, float(np.abs(target - q).max()) / 0.2)
             return stage_rules.retime_path(stage_rules.min_jerk_path(q, target, seconds), chain)
+        if method == "via":
+            return self._via_points(chain, q, target)
         return escape_path(chain, chair_scene(), q, target)
+
+    VIA_TRIES = 600
+
+    @staticmethod
+    def _via_points(chain, q, target):
+        """Two straight joint-space legs q -> w -> target through a seeded random waypoint w, for starts
+        (a parked arm) where neither the straight line nor escape_path passes. A waypoint is kept only
+        if both legs, sampled finely, keep the person floor, the 0.35 m rule and the obstacle floor
+        against the scene grown by MARGIN_M; the full path rules are checked by the caller. Returns
+        None when no waypoint is found."""
+        scene = grown_scene(chair_scene(), stage_store.MARGIN_M)
+        lim = stage_rules.guard_limits(chain)
+        far = stage_rules._FAR_PARTS
+        rng = np.random.default_rng(0)
+        for _ in range(PuppyPlayground.VIA_TRIES):
+            w = q + rng.uniform(0.2, 0.8) * (target - q) + rng.normal(0.0, 0.35, 7) * (rng.random(7) < 0.5)
+            qs = np.vstack([q[None, :], np.linspace(q, w, 60)[1:], np.linspace(w, target, 60)[1:]])
+            if np.any(np.abs(qs) > lim):
+                continue
+            c = clearances_batch(chain, scene, qs, False)
+            person, obstacle = c[:, 0, :], c[:, 1, :]
+            if np.isnan(c).any() or np.any(person < person[0] - 1e-9):
+                continue
+            f = person[:, far]
+            reached = np.maximum.accumulate(f >= stage_rules.PERSON_STAGE_M, axis=0)
+            if np.any(np.where(reached, stage_rules.PERSON_STAGE_M - f, 0.0) > 1e-9):
+                continue
+            if np.any(obstacle < np.minimum(obstacle[0], stage_rules.OBSTACLE_KEEP_M) - stage_rules.OBSTACLE_TOL_M):
+                continue
+            dense = np.vstack([np.linspace(q, w, 200), np.linspace(w, target, 200)[1:]])
+            return stage_rules.retime_path(stage_rules.points_from_q(dense), chain)
+        return None
 
     def _stage(self, ctx, rec):
         urdf_text, chain = self._urdf()
