@@ -278,3 +278,23 @@ def test_seeds_change_between_sends():
     r.sup.goal_done()
     b = sends(r.step(5))[0]
     assert a.seed != b.seed
+
+
+def test_a_stop_code_turns_auto_off_and_it_never_sends_again():
+    for code in ("drifted", "no_anchor", "contact", "control_taken", "estopped"):
+        r = Rig()
+        r.play()
+        assert r.sup.goal_done(code) == []
+        assert r.sup.state is State.OFF and r.sup.off_reason == code
+        assert r.step(60) == []
+        r.sup.toggle(True)  # toggling on clears the reason and auto resumes
+        assert r.sup.off_reason is None and r.sup.state is not State.OFF
+        assert sends(r.step(10))
+
+
+def test_goal_done_without_a_stop_code_waits_as_before():
+    for code in (None, "driver_error", "check_failed"):
+        r = Rig()
+        r.play()
+        r.sup.goal_done(code)
+        assert r.sup.state is State.WAITING_IDLE and r.sup.off_reason is None

@@ -134,7 +134,7 @@ class UiController:
             if not ok and not cancelled:
                 self._refusal = {"action": kind, "error_code": error_code, "message": message}
             if kind == "auto":
-                self._run(self.sup.goal_done())
+                self._run(self.sup.goal_done(error_code or None))
 
     # -- HTTP -----------------------------------------------------------------
 
@@ -145,6 +145,7 @@ class UiController:
                 "mood": self._engine.get("mood", ""),
                 "last_refusal": self._refusal,
                 "auto": self.sup.state.value,
+                "off_reason": self.sup.off_reason,
                 "busy": self._active is not None,
                 "estopped": self._estopped,
             }

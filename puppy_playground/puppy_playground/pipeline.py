@@ -12,14 +12,16 @@ from capability_engine.arm import HALTED, IMPEDANCE, QUEUE
 from capability_engine.driver_state import ArmError, ControlTaken, EStopped
 from capability_engine.engine import EngineError
 
-from puppy_motion.validate import check_beat
+from rammp_arm import ERRORS
 
 from puppy_motion.joints import align_turns, shortest_delta
+from puppy_motion.validate import check_beat
 
 from . import playlog
 
 STILL_RAD_S = 0.02  # every |dq| must be below this to start a beat
 SHIFT_TOL_RAD = 0.02  # a beat starting this close to the measured posture is shifted onto it
+ANCHOR_TOL_RAD = 0.02  # auto beats start within this of a named pose (stage, or the stored rest)
 HALT_STATUS_WAIT_S = 0.5  # after a HALTED goal, how long /control_status may take to show an e-stop
 
 
@@ -31,7 +33,15 @@ def _measure(arm):
         raise _ended(e)
     except ArmError as e:
         raise EngineError("no_state", f"cannot read the arm: {e}", recoverable=True)
-    return np.array(js.position, dtype=float), float(np.abs(np.array(js.velocity, dtype=float)).max())
+    try:
+        q = np.array(js.position, dtype=float)
+        v = np.array(js.velocity, dtype=float)
+    except (TypeError, ValueError) as e:
+        raise EngineError("bad_state", f"unreadable joint state: {e}", recoverable=True)
+    if q.shape != (7,) or v.shape != (7,) or not np.isfinite(q).all():
+        raise EngineError("bad_state", "the joint state is not seven finite positions", recoverable=True)
+    # a NaN velocity makes the speed NaN, which fails every "still" comparison below (closed)
+    return q, float(np.abs(v).max())
 
 
 def _ended(e):
@@ -40,14 +50,15 @@ def _ended(e):
     return EngineError("control_taken", str(e))
 
 
-def play(arm, ctx, chain, scene, beat_builder, held, log=None, name=None):
+def play(arm, ctx, chain, scene, beat_builder, held, log=None, name=None, anchors=None):
     """Play one beat; returns the log record. `beat_builder(q, held)` gives the Beat (or None when
     there is nothing to play) for the measured posture q. On a failed check nothing is sent and
     EngineError("check_failed", <rules>, recoverable=True) is raised. `log(rec)` is called with the
-    record however this ends."""
+    record however this ends. `anchors`: poses (7-vectors); when given, the final measured posture must
+    be within ANCHOR_TOL_RAD of one of them or EngineError("drifted") ends the action."""
     rec = playlog.motion_record(name, held)
     try:
-        return _play(arm, ctx, chain, scene, beat_builder, bool(held), rec)
+        return _play(arm, ctx, chain, scene, beat_builder, bool(held), rec, anchors)
     except BaseException as e:
         rec["ok"] = False
         rec["error"] = f"{type(e).__name__}: {e}"
@@ -57,9 +68,9 @@ def play(arm, ctx, chain, scene, beat_builder, held, log=None, name=None):
             log(rec)
 
 
-def _play(arm, ctx, chain, scene, beat_builder, held, rec):
+def _play(arm, ctx, chain, scene, beat_builder, held, rec, anchors):
     q, speed = _measure(arm)
-    if speed >= STILL_RAD_S:
+    if not (speed < STILL_RAD_S):
         raise EngineError("not_still", "the arm is moving", recoverable=True)
     ctx.checkpoint()
     beat = beat_builder(q, held)
@@ -70,10 +81,15 @@ def _play(arm, ctx, chain, scene, beat_builder, held, rec):
     points = beat.points
     # the posture the beat is checked against and sent from is the one measured right now
     q, speed = _measure(arm)
-    if speed >= STILL_RAD_S:
+    if not (speed < STILL_RAD_S):
         raise EngineError("not_still", "the arm is moving", recoverable=True)
+    if anchors is not None and not _anchored(chain, q, anchors):
+        raise EngineError(
+            "drifted",
+            "the arm has drifted from the stage pose; press Stage (or Rest) to re-seat it",
+        )
     gap = float(np.abs(shortest_delta(chain, q, points[0][1])).max())
-    if gap > SHIFT_TOL_RAD:
+    if not (gap <= SHIFT_TOL_RAD):
         raise EngineError(
             "start_mismatch", f"the arm is {gap:.4f} rad from where the beat starts", recoverable=True
         )
@@ -86,7 +102,6 @@ def _play(arm, ctx, chain, scene, beat_builder, held, rec):
     rec["checks"] = [f"{v.rule}: {v.detail}" for v in found]
     if found:
         raise EngineError("check_failed", "; ".join(rec["checks"]), recoverable=True)
-    rec.update(playlog.summarize(points, chain, scene, held))
     rec["goal"] = {
         "points": len(points), "seconds": float(points[-1][0]), "control_mode": "IMPEDANCE", "gains": "default",
     }
@@ -100,7 +115,21 @@ def _play(arm, ctx, chain, scene, beat_builder, held, rec):
         rec["driver"] = {"refused": str(e)}
         raise EngineError("refused", f"the arm refused the beat: {e}", recoverable=True)
     rec["driver"] = {"error_code": int(res.error_code), "error_string": res.error_string}
+    final_error = getattr(res, "final_error", None)
+    if final_error is not None:
+        rec["driver"]["final_error"] = [float(x) for x in np.asarray(final_error, dtype=float).ravel()]
+    try:  # the summary is for the log only: after the send, so it never delays the move
+        rec.update(playlog.summarize(points, chain, scene, held))
+    except Exception as e:  # noqa: BLE001
+        rec["summary_error"] = f"{type(e).__name__}: {e}"
     if res.error_code != 0:
+        name = ERRORS.get(int(res.error_code), res.error_string)
+        if name == "PREEMPTED":
+            raise EngineError("control_taken", "the beat was preempted: control was taken")
+        if name in ("PATH_TOLERANCE_VIOLATED", "GOAL_TOLERANCE_VIOLATED"):
+            raise EngineError(
+                "contact", "the arm stopped the beat early; possible contact; check the arm"
+            )
         if res.error_code == HALTED:  # the driver halted it: an e-stop, else control was taken
             if _estopped(arm):
                 raise EngineError("estopped", "the arm e-stopped during the beat")
@@ -121,3 +150,9 @@ def _estopped(arm):
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.05)
+
+
+def _anchored(chain, q, anchors):
+    return any(
+        np.abs(shortest_delta(chain, np.asarray(a, dtype=float), q)).max() <= ANCHOR_TOL_RAD for a in anchors
+    )

@@ -60,6 +60,7 @@ function poll() {
   fetch("/status").then(function (r) { return r.json(); }).then(function (s) {
     var t = "state: " + s.state + (s.busy ? " (busy)" : "") + " | mood: " + s.mood + " | auto: " + s.auto + (s.estopped ? " | E-STOPPED" : "");
     if (s.last_refusal) t += " | last refusal: " + s.last_refusal.action + " " + s.last_refusal.error_code + " " + s.last_refusal.message;
+    if (s.off_reason && s.auto == "off") t += " | auto turned off: " + s.off_reason + (s.off_reason == "estopped" ? "" : " — press Stage (or Rest)");
     $("status").textContent = t;
     $("auto").checked = s.auto != "off";
   }).catch(function () { $("status").textContent = "no connection"; });

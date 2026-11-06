@@ -366,3 +366,13 @@ def test_joint_order_does_not_matter():
     names = list(reversed(FAKE_NAMES))
     vel = [0.0] * 7 + [NAN]
     assert arm_moving(names, vel) is False
+
+
+def test_a_stop_code_from_the_auto_goal_turns_auto_off_and_shows_the_reason(ui):
+    start_auto(ui)
+    ui.finish(False, "drifted", "the arm has drifted from the stage pose")
+    status = json.loads(ui.get("/status")[1])
+    assert status["auto"] == "off" and status["off_reason"] == "drifted"
+    ui.advance(30)
+    assert len(ui.backend.goals) == 1  # nothing more is sent
+    assert ui.post("/stage")[0] == 200  # the user can act again

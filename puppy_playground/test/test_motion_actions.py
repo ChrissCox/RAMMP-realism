@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import rclpy
-from capability_engine.arm import _impedance_gains
+from capability_engine.arm import QUEUE, _impedance_gains
 from capability_engine.engine import EngineError
 from fake_driver import FLATBOT_URDF, FakeDriver
 from rammp_orchestrator_interfaces.action import ExecuteAction
@@ -137,8 +137,12 @@ class StubArm:
     def joint_states(self):
         return SimpleNamespace(position=self.q, velocity=np.full(7, self.speed))
 
+    sag = 0.0  # how far the reading falls (joint 7) after each beat: impedance creep
+
     def execute_joint_trajectory(self, *a, **k):
         self.sent.append((a, k))
+        self.q = self.q.copy()
+        self.q[6] -= self.sag
         return SimpleNamespace(error_code=0, error_string="")
 
 
@@ -148,7 +152,8 @@ def test_express_sends_one_impedance_default_goal_with_central_velocities(env, s
     assert res.status == Result.STATUS_SUCCESS, res.error_code
     assert len(goals(env)) == 1
     g = goals(env)[0]
-    assert g.control_mode == IMPEDANCE and g.gains == _impedance_gains("default")
+    assert g.control_mode == IMPEDANCE and g.gains == _impedance_gains("default") and g.preemption == QUEUE
+    assert not env.fake.setpoints["/setpoint/gripper"]
     pts = g.trajectory.points
     q = np.array([p.positions for p in pts])
     dq = np.array([p.velocities for p in pts])
@@ -336,3 +341,103 @@ def test_express_plays_when_the_driver_reports_continuous_joints_wrapped(env, st
     assert len(goals(env)) == 1
     first = np.array(goals(env)[0].trajectory.points[0].positions)
     assert np.allclose(first, wrapped, atol=1e-9)  # the beat was shifted to the reading's turn
+
+
+def test_nan_readings_fail_closed_and_send_nothing(stage_q, chain):
+    for field, code in (("velocity", "not_still"), ("position", "bad_state")):
+        arm = StubArm(stage_q)
+        orig = arm.joint_states
+
+        def js(orig=orig, field=field):
+            r = orig()
+            bad = np.array(getattr(r, field), dtype=float)
+            bad[3] = np.nan
+            return SimpleNamespace(**{**vars(r), field: bad})
+
+        arm.joint_states = js
+        with pytest.raises(EngineError) as e:
+            pipeline.play(arm, StubCtx(), chain, chair_scene(), lambda q, h: pytest.fail("built"), False)
+        assert e.value.error_code == code and e.value.recoverable and not arm.sent
+
+
+def test_a_sagging_reading_ends_play_as_drifted_before_total_drift_passes_the_anchor(stage_q, chain):
+    scene = chair_scene()
+    source = motion.BeatSource(chain, scene, stage_q)
+    arm = StubArm(stage_q)
+    arm.sag = 0.005
+    beats = 0
+    with pytest.raises(EngineError) as e:
+        for _ in range(20):
+            pipeline.play(
+                arm, StubCtx(), chain, scene, lambda q, h: source.beat("head_tilt", 0.25, q, h), False,
+                anchors=[stage_q],
+            )
+            beats += 1
+    assert e.value.error_code == "drifted" and not e.value.recoverable
+    assert len(arm.sent) == beats
+    assert abs(arm.q[6] - stage_q[6]) <= pipeline.ANCHOR_TOL_RAD + 2 * arm.sag
+    sent_before = len(arm.sent)
+    with pytest.raises(EngineError):
+        pipeline.play(arm, StubCtx(), chain, scene, lambda q, h: source.beat("head_tilt", 0.25, q, h), False, anchors=[stage_q])
+    assert len(arm.sent) == sent_before  # nothing sent after it
+
+
+def test_auto_ends_as_drifted_when_a_beat_leaves_the_arm_off_the_stage_pose(env, stage_q):
+    env.at(stage_q)
+    after = stage_q.copy()
+    after[6] += 0.03
+    env.fake.finish_at("execute_joint_trajectory", joints=after)
+    res = env.finish(env.start("auto", {"size": 0.25, "seed": 1}), 90.0)
+    assert (res.status, res.error_code, res.recoverable) == (Result.STATUS_FAILED, "drifted", False)
+    assert len(goals(env)) == 1
+
+
+@pytest.mark.parametrize(
+    "code,expected,recoverable",
+    [(-6, "control_taken", False), (-4, "contact", False), (-5, "contact", False), (-1, "driver_error", True)],
+)
+def test_driver_aborts_end_combo_and_auto(env, stage_q, code, expected, recoverable):
+    env.at(stage_q)
+    env.fake.set_result("execute_joint_trajectory", code)
+    res = env.run("combo", {"names": ["nod", "perk"], "size": 0.25})
+    assert (res.status, res.error_code, res.recoverable) == (Result.STATUS_FAILED, expected, recoverable)
+    assert len(goals(env)) == 1
+    if recoverable:
+        return  # auto carries on after a recoverable driver error
+    goals(env).clear()
+    res = env.finish(env.start("auto", {"size": 0.25, "seed": 1}), 90.0)
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, expected)
+    assert len(goals(env)) == 1
+
+
+def test_the_beat_cache_survives_actions(env, stage_q, monkeypatch):
+    composed = []
+    real = motion.BeatSource._compose
+
+    def spy(self, name, size, q, held, seed):
+        composed.append((name, size))
+        return real(self, name, size, q, held, seed)
+
+    monkeypatch.setattr(motion.BeatSource, "_compose", spy)
+    env.at(stage_q)
+    for _ in range(2):
+        assert env.run("express", {"name": "nod", "size": 0.25}).status == Result.STATUS_SUCCESS
+    assert composed == [("nod", 0.25)]
+    assert len(goals(env)) == 2
+
+
+def test_bad_size_and_seed_are_refused_not_clamped(env, stage_q):
+    for bad in (0.1, 1.5, True, "big", None, float("nan")):
+        with pytest.raises(EngineError) as e:
+            motion.parse_size({"size": bad})
+        assert e.value.error_code == "bad_params" and e.value.recoverable
+    assert motion.parse_size({}) == 0.25 and motion.parse_size({"size": 1}) == 1.0
+    for bad in (-1, True, None, 1.5, "3"):
+        with pytest.raises(EngineError) as e:
+            motion.parse_seed({"seed": bad})
+        assert e.value.error_code == "bad_params"
+    assert motion.parse_seed({}) == 1 and motion.parse_seed({"seed": 0}) == 0
+    env.at(stage_q)
+    res = env.run("express", {"name": "nod", "size": 3.0})
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "bad_params")
+    assert not goals(env)

@@ -18,6 +18,8 @@ GRACE_S = 2.0
 RETRY_GAP_S = 1.0
 SIZE_MIN, SIZE_MAX = 0.25, 1.0
 BUSY_STATES = ("executing", "paused")
+# auto result codes after which auto stays OFF until the user turns it on again
+STOP_CODES = frozenset({"drifted", "no_anchor", "contact", "control_taken", "estopped"})
 
 
 class State(enum.Enum):
@@ -51,6 +53,7 @@ class Supervisor:
         self._last_send = None
         self._quiet_since = clock()
         self._discovered_at = None
+        self.off_reason = None  # the stop code that turned auto off, until it is toggled on
 
     # -- inputs ---------------------------------------------------------------
 
@@ -73,6 +76,7 @@ class Supervisor:
             return self._enter(State.OFF)
         if self.state is not State.OFF:
             return []
+        self.off_reason = None
         return self._enter(self._waiting_state(self._clock()))
 
     def engine_status(self, engine_id, state):
@@ -101,9 +105,14 @@ class Supervisor:
             return self._enter(self._waiting_state(self._clock()))
         return []
 
-    def goal_done(self):
-        """The auto goal ended by itself: nothing to cancel."""
+    def goal_done(self, code=None):
+        """The auto goal ended by itself: nothing to cancel. A stop code (drifted, contact, ...)
+        turns auto off for good: it never sends again until the user toggles it on."""
         self._quiet_since = self._clock()
+        if code in STOP_CODES and self.state is not State.OFF:
+            self.off_reason = code
+            self.state = State.OFF
+            return []
         if self.state is State.PLAYING:
             self.state = State.WAITING_IDLE
         return []

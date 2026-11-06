@@ -12,6 +12,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
+from capability_engine.driver_state import ArmError
 from capability_engine.engine import EngineError
 from rammp_arm_interfaces.msg import GripperState
 from rclpy.qos import qos_profile_sensor_data
@@ -20,7 +21,7 @@ from std_msgs.msg import String
 from puppy_motion.behaviors import Targets
 from puppy_motion.idle import EXPRESSIONS, LOOK_TARGET, IdleDirector
 
-from . import pipeline, playlog
+from . import pipeline, playlog, stage_store
 from puppy_motion.flatbot import chair_scene
 
 AT_STAGE_RAD = 0.02  # express / combo start within this of the stage pose
@@ -32,14 +33,24 @@ PREFETCH_AFTER_S = 0.5  # auto starts composing its next beat this long after a 
 EXPRESS_SEED = 0
 
 
-def clean_size(value):
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
+def parse_size(params):
+    """The size param: absent means the default; otherwise a finite number in [0.25, 1.0]."""
+    if "size" not in params:
         return SIZE_DEFAULT
-    if not np.isfinite(v):
-        return SIZE_DEFAULT
-    return min(SIZE_MAX, max(SIZE_MIN, v))
+    v = params["size"]
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not np.isfinite(v) or not (SIZE_MIN <= v <= SIZE_MAX):
+        raise EngineError("bad_params", f"size must be a number in [{SIZE_MIN}, {SIZE_MAX}], not {v!r}", recoverable=True)
+    return float(v)
+
+
+def parse_seed(params):
+    """The seed param: absent means 1; otherwise an int >= 0 (not a bool, float or null)."""
+    if "seed" not in params:
+        return 1
+    v = params["seed"]
+    if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+        raise EngineError("bad_params", f"seed must be an integer >= 0, not {v!r}", recoverable=True)
+    return v
 
 
 class GripperWatch:
@@ -109,12 +120,29 @@ def _wait_first(ctx, w):
 
 
 def _setup(engine):
-    _, chain = engine._urdf()
-    return chain, chair_scene(), engine._stage_q(chain)
+    urdf_text, chain = engine._urdf()
+    return urdf_text, chain, chair_scene(), engine._stage_q(chain)
+
+
+def _still(engine):
+    try:
+        return engine._still_q()
+    except ArmError as e:
+        raise EngineError("no_state", f"cannot read the arm: {e}", recoverable=True)
+
+
+def _source(engine, urdf_text, chain, scene, stage_q):
+    """The engine's one BeatSource, kept across actions; rebuilt when the URDF or stage pose change."""
+    key = (stage_store.urdf_hash(urdf_text), np.asarray(stage_q, dtype=float).tobytes())
+    cur = getattr(engine, "_beat_source", None)
+    if cur is None or cur[0] != key:
+        cur = (key, BeatSource(chain, scene, stage_q))
+        engine._beat_source = cur
+    return cur[1]
 
 
 def _require_stage(engine, chain, stage_q):
-    q = engine._still_q()
+    q = _still(engine)
     if np.abs(pipeline.shortest_delta(chain, q, stage_q)).max() > AT_STAGE_RAD:
         raise EngineError("not_at_stage", "the arm is not at the stage pose", recoverable=True)
 
@@ -129,7 +157,7 @@ def _names(names):
 
 def express(engine, ctx, rec):
     p = rec["params"]
-    return _play_names(engine, ctx, rec, [p.get("name")], clean_size(p.get("size")))
+    return _play_names(engine, ctx, rec, [p.get("name")], parse_size(p))
 
 
 def combo(engine, ctx, rec):
@@ -137,13 +165,13 @@ def combo(engine, ctx, rec):
     names = p.get("names") or []
     if not isinstance(names, list) or not names:
         raise EngineError("bad_params", "combo needs a non-empty list of names", recoverable=True)
-    return _play_names(engine, ctx, rec, names, clean_size(p.get("size")))
+    return _play_names(engine, ctx, rec, names, parse_size(p))
 
 
 def _play_names(engine, ctx, rec, names, size):
     _names(names)
-    chain, scene, stage_q = _setup(engine)
-    source = BeatSource(chain, scene, stage_q)
+    urdf_text, chain, scene, stage_q = _setup(engine)
+    source = _source(engine, urdf_text, chain, scene, stage_q)
     watch = _watch(engine)
     _wait_first(ctx, watch)
     rec["motions"] = []
@@ -175,11 +203,22 @@ def _take_request(requests, log):
     return None
 
 
+def _anchors(engine, urdf_text, chain, stage_q):
+    """The poses auto may start a beat from: the stage pose and, with an approved stage path, its rest."""
+    anchors = [np.asarray(stage_q, dtype=float)]
+    try:
+        anchors.append(stage_store.load(engine.stage_path, urdf_text, stage_q, chain).q_rest)
+    except Exception:  # noqa: BLE001 -- no usable stored path: the stage pose alone
+        pass
+    return anchors
+
+
 def auto(engine, ctx, rec):
     p = rec["params"]
-    size = clean_size(p.get("size"))
-    seed = int(p.get("seed", 1))
-    chain, scene, _ = _setup(engine)
+    size = parse_size(p)
+    seed = parse_seed(p)
+    urdf_text, chain, scene, stage_q = _setup(engine)
+    anchors = _anchors(engine, urdf_text, chain, stage_q)
     director = IdleDirector(chain, scene, Targets(person_head=LOOK_TARGET), size, seed)
     watch = _watch(engine)
     requests = _Requests()
@@ -187,6 +226,8 @@ def auto(engine, ctx, rec):
     _wait_first(ctx, watch)
     rec["motions"] = 0
     log = engine.get_logger()
+    if not anchors:
+        raise EngineError("no_anchor", "no stage pose to anchor auto to")
 
     def write(m):
         playlog.write(engine.log_path, {**m, "action": "auto"}, log.warning)
@@ -194,7 +235,7 @@ def auto(engine, ctx, rec):
     pool = ThreadPoolExecutor(max_workers=1)  # the only thread that touches the director
 
     def submit_next():
-        q = engine._still_q()
+        q = _still(engine)
         h = watch.held()
         return h, pool.submit(director.next, q, h, time.monotonic())
 
@@ -204,7 +245,9 @@ def auto(engine, ctx, rec):
 
         rec["motions"] += 1
         try:
-            pipeline.play(engine.arm, ctx, chain, scene, builder, watch.held(), log=write, name=name)
+            pipeline.play(
+                engine.arm, ctx, chain, scene, builder, watch.held(), log=write, name=name, anchors=anchors
+            )
         except EngineError as e:
             if not e.recoverable:
                 raise
@@ -246,7 +289,7 @@ def auto(engine, ctx, rec):
                     pending[1].result()  # the worker is done with the director
                     pending = None
                 try:
-                    q = engine._still_q()
+                    q = _still(engine)
                     h = watch.held()
                     beat = pool.submit(director.request, request, q, h, time.monotonic()).result()
                     play_beat(beat, h, request)
