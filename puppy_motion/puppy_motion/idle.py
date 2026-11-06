@@ -10,11 +10,7 @@ from collections import deque
 import numpy as np
 
 from . import behaviors as B
-from .beat import Beat, to_points
-from .compose import compose
-from .geometry import PARTS, clearances
-from .track import DT, Zone, constant_track
-from .validate import check_beat
+from .beat import Beat, compose_beat, zone_at
 
 LOOK_TARGET = np.array([1.2, -0.36, 0.9])  # about 1 m in front of the seat front, standing head height
 MOODS = ("calm", "curious", "playful", "sleepy")
@@ -22,11 +18,7 @@ DWELL_S = {"calm": (20.0, 60.0), "curious": (15.0, 40.0), "playful": (10.0, 25.0
 PAUSE_S = (1.0, 6.0)
 SLEEPY_AFTER_S = 180.0
 LOG_MAX = 200  # the director's log keeps the latest entries (auto mode runs unattended for hours)
-NEAR_USER_M = 0.35
-MOVED_RAD = 1e-3  # a beat that moves less than this was refused down to nothing
 T_ON = 0.3
-TAIL_S = 0.4
-HEAD = PARTS.index("head")
 
 MOOD_BEATS = {
     "calm": ("breathe", "glance"),
@@ -164,31 +156,12 @@ class IdleDirector:
         if held and name in NOT_WHEN_HELD:
             self.log.append(f"{name}: not while holding something")
             return None
-        head_clear = clearances(self.chain, self.scene, q_now, held)[0, HEAD]
-        zone = Zone.NEAR_USER if head_clear < NEAR_USER_M else Zone.FREE
+        zone = zone_at(self.chain, self.scene, q_now, held)
         seed = int(self.rng.integers(1 << 30))
-        sub = np.random.default_rng(seed)
-        track = constant_track(q_now, 0.0, LENGTH_S[name], zone, name)
-        track.held[:] = held
-        try:
-            ctx = B.Context.of(track, self.chain, self.scene, self.targets, seed)
-            parts = BUILDERS[name](ctx, sub, held)
-            for p in parts:
-                p.head *= self.size
-                p.joints *= self.size
-            composed = compose(track, parts, self.chain, self.scene)
-        except Exception as e:  # a behavior that cannot be built here is skipped, not fatal
-            self.log.append(f"{name}: not built ({type(e).__name__}: {e})")
-            return None
-        dev = np.abs(composed.q - q_now).max(axis=1)
-        if dev.max() < MOVED_RAD:
-            self.log.append(f"{name}: no room to move here")
-            return None
-        end = min(int(np.nonzero(dev > 1e-9)[0][-1]) + int(round(TAIL_S / DT)), composed.n - 1)
-        composed.q = composed.q[: end + 1]
-        points = to_points(composed)
-        found = check_beat(points, q_now, self.chain, self.scene, zone, held=held)
-        if found:
-            self.log.append(f"{name}: refused ({found[0]})")
-            return None
-        return Beat(name, mood, points, zone)
+        beat, why = compose_beat(
+            name, mood, BUILDERS[name], LENGTH_S[name], q_now, held, zone, self.chain, self.scene,
+            self.targets, seed, size=self.size,
+        )
+        if why:
+            self.log.append(why)
+        return beat

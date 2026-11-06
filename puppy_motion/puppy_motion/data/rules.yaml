@@ -1,0 +1,35 @@
+# Which beat plays at which task event, per capability. Read by puppy_motion.director.
+#
+# A row: event (TaskRequested | BeforeMove | AfterMove | Succeeded | Failed), beat (a name in
+# director.BEATS), keep (its priority: a tight budget drops the lower ones first; the subtle preset
+# plays only keep >= 6). Optional conditions:
+#   phase / not_phase: the capability's current phase (the last Phase event) is / is not this one
+#   precise_end: a BeforeMove row matches only a move that does / does not end at a precise pose
+#   recoverable: a Failed row matches only a recoverable / unrecoverable failure
+# Rows of one event all play, in table order (the budget decides which). A capability or event with
+# no row gets no beat. Anything a row does not name is simply not expressed.
+
+grab_container: &moving_task
+  - {event: TaskRequested, beat: eager, keep: 5}
+  - {event: AfterMove, phase: view, beat: curious, keep: 4}
+  - {event: BeforeMove, precise_end: true, beat: lock_on, keep: 7}
+  - {event: BeforeMove, precise_end: false, beat: wind_up, keep: 2}
+  - {event: AfterMove, not_phase: view, beat: follow_through, keep: 1}
+  - {event: Succeeded, beat: proud, keep: 6}
+  - {event: Succeeded, beat: attentive, keep: 1}
+  - {event: Failed, recoverable: true, beat: search, keep: 3}
+  - {event: Failed, recoverable: true, beat: sorry, keep: 6}
+  - {event: Failed, recoverable: true, beat: shake_off, keep: 4}
+
+# The press: the same rows (lock_on plays on the press's BeforeMove, the move that ends at the
+# pre-press pose).
+button_press: *moving_task
+
+# box_opening runs in a subprocess: only the boundaries of the task get a beat, never a phase or a
+# move. All its phases are PRECISION (zones.yaml).
+box_opening:
+  - {event: TaskRequested, beat: eager, keep: 5}
+  - {event: Succeeded, beat: proud, keep: 6}
+  - {event: Succeeded, beat: attentive, keep: 1}
+  - {event: Failed, recoverable: true, beat: sorry, keep: 6}
+  - {event: Failed, recoverable: true, beat: shake_off, keep: 4}

@@ -38,3 +38,13 @@ button_press:
   - {phase: mock, message: "mock: nothing detected or moved", zone: PRECISION}  # mock mode moves nothing
   - {phase: done, message: done, zone: FREE}
   - {phase: done, message: "dry run: nothing moved", zone: FREE}
+
+# box_opening runs in a subprocess, so the arm's phases are all precise and no move is expressive.
+box_opening:
+  - {phase: locate, any_message: true, zone: PRECISION}
+  - {phase: look, any_message: true, zone: PRECISION}
+  - {phase: press, any_message: true, zone: PRECISION}
+  - {phase: grip, any_message: true, zone: PRECISION}
+  - {phase: carry, any_message: true, zone: PRECISION}
+  - {phase: release, any_message: true, zone: PRECISION}
+  - {phase: home, any_message: true, zone: PRECISION}
