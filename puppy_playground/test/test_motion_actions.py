@@ -139,6 +139,7 @@ class StubArm:
 
     def execute_joint_trajectory(self, *a, **k):
         self.sent.append((a, k))
+        return SimpleNamespace(error_code=0, error_string="")
 
 
 def test_express_sends_one_impedance_default_goal_with_central_velocities(env, stage_q):
