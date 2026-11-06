@@ -193,7 +193,7 @@ def test_startup_grace_after_discovery():
 def test_no_control_status_yet_counts_as_estopped():
     sup = Supervisor(lambda: 0.0)
     sup.toggle(True)
-    assert sup.state is State.ESTOPPED
+    assert sup.state is State.OFF and sup.off_reason == "estopped"
 
 
 def test_estop_while_playing_cancels_and_turns_auto_off_and_release_does_not_restart():
