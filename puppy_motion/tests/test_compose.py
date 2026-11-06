@@ -369,3 +369,28 @@ def test_when_nothing_can_be_blamed_every_contribution_is_switched_off(home, cha
     assert all(c.scale == 0.0 for c in parts)
     assert np.array_equal(out.q, rest.q)
     assert _failed(out, chain, scene) == []
+
+
+def test_offsets_that_only_break_the_person_floor_together_are_blamed_by_their_realised_offset(home, chain, scene):
+    """Neither held joint offset alone lowers the upper arm's person clearance; together they put it
+    under the floor. Only the per-sample realised-offset blame can shrink them (no fail-safe)."""
+    a = np.array([0.1424, -0.2529, -0.179, 0.0368, -0.0488, 0.2174, 0.0087])
+    b = np.array([-0.2018, 0.2092, 0.1784, -0.0368, 0.0488, -0.2174, -0.0087])
+    base = compose.clearances_of(chain, scene, home, False)
+    floor = compose.clearance_floor(base)
+    upper = PARTS.index("upper_arm")
+    for off in (a, b):
+        assert compose.clearances_of(chain, scene, home + off, False)[0, upper] >= base[0, upper]
+    assert compose.clearances_of(chain, scene, home + a + b, False)[0, upper] < floor[0, upper]
+    rest = constant_track(home, 0.5, 1.0)
+    parts = []
+    for name, off in (("A", a), ("B", b)):
+        c = Contribution.empty(name, rest.n)
+        c.joints[:] = off
+        parts.append(c)
+    out = compose_track(rest, parts, chain, scene)
+    assert all(0.0 < c.scale < 1.0 for c in parts)
+    assert not any("switched off" in line for line in out.log)
+    clr = np.array([compose.clearances_of(chain, scene, q, False)[0] for q in out.q])
+    assert (clr >= floor[0] - 1e-12).all()
+    assert _failed(out, chain, scene) == []
