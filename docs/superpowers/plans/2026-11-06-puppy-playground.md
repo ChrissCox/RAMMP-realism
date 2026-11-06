@@ -30,9 +30,17 @@ against the chair's no-go boxes before it is sent.
 **Spec:** `docs/superpowers/specs/2026-11-06-puppy-playground-design.md`. It builds on
 `docs/superpowers/specs/2026-11-05-puppy-mode-design.md`.
 
-**Prerequisite:** Parts A and B of `docs/superpowers/plans/2026-11-05-puppy-mode-build.md` are
-complete (Tasks 1–10). That includes the Task 10 driver-model variant for trajectories with positions
-and velocities only. Work continues on branch `feature/puppy-mode-build`.
+**Prerequisite (fast track, user asked for speed on 2026-11-06):** Tasks 1–6 of
+`docs/superpowers/plans/2026-11-05-puppy-mode-build.md` are complete. That covers the URDF, track,
+geometry, composer, behaviors and validator. The main plan's Tasks 7–13 wait until after this plan.
+
+As a consequence:
+- `Beat` is defined here, in `puppy_motion/puppy_motion/beat.py`, not taken from the main plan's
+  Task 7.
+- The previews use the existing throwaway `spike/` renderer and its `spike/puppy_sim/dynamics.py`
+  (Task 4), not `sim/`.
+
+Work continues on branch `feature/puppy-mode-build`.
 
 ## Global Constraints
 
@@ -209,7 +217,11 @@ def test_a_min_jerk_path_from_rest_to_a_found_stage_pose_is_accepted_or_names_it
 - Test: `puppy_motion/tests/test_idle.py`.
 
 **Interfaces:**
-- Consumes: `behaviors`, `compose`, `check_beat`, `director.Beat`, `track.constant_track`.
+- Consumes: `behaviors`, `compose`, `check_beat`, `track.constant_track`.
+- Produces: `puppy_motion/puppy_motion/beat.py` with `Beat(name: str, mood: str, points:
+  list[tuple[float, np.ndarray, np.ndarray]], zone: Zone)` and
+  `to_points(track: Track) -> list[tuple[float, np.ndarray, np.ndarray]]`. Velocities are central
+  differences, first and last exactly 0. The main plan's Task 7 reuses `beat.py` later.
 - Produces: `MOODS = ("calm", "curious", "playful", "sleepy")`.
 - Produces: `IdleDirector(chain, scene, targets, size: float, seed: int)`. The playground passes
   `Targets(person_head=LOOK_TARGET)` (Global Constraints, pipeline step 3).
@@ -247,12 +259,16 @@ def test_at_rest_beats_are_small_and_never_closer_to_the_person():   # person cl
 
 ### Task 4: Playground previews with the chair boxes
 
-**Files:**
-- Create: `sim/puppy_sim/flatbot_scene.py`. It is the MuJoCo scene with the chair boxes drawn as
+**Files** (fast track: in the existing `spike/`, using its renderer and `dynamics.py`, with
+`puppy_motion` installed into `spike/.venv` editable):
+- Create: `spike/puppy_sim/flatbot_scene.py`. It is the MuJoCo scene with the chair boxes drawn as
   translucent boxes in place of the mannequin, and an empty chair.
-- Create: `sim/puppy_sim/clips/playground_stage.py`, `playground_expressions.py` and
-  `playground_auto.py`.
-- Test: `sim/tests/test_playground_clips.py`.
+- Create: `spike/puppy_sim/clips/playground_stage.py`, `playground_expressions.py` and
+  `playground_auto.py`. Each builds its joint tracks with `puppy_motion` and hands the `q` arrays to
+  the spike's Track and renderer.
+- Modify: `spike/puppy_sim/dynamics.py`. Add the positions-and-velocities trajectory variant (central
+  dq, no accelerations), matching what `execute_joint_trajectory` sends.
+- Test: `spike/tests/test_playground_clips.py`.
 
 **Interfaces:**
 - Consumes: `flatbot.chair_scene`, `stage.find_stage_poses`, `stage.min_jerk_path`,
@@ -276,7 +292,7 @@ def test_driver_model_overshoot_with_positions_and_velocities_is_within_the_chec
     # every expression at size 1.0, impedance "default": achieved head path stays within check_beat's floors
 ```
 
-- [ ] **Step 2: Run** `cd sim && .venv/Scripts/python -m pytest -q tests/test_playground_clips.py`;
+- [ ] **Step 2: Run** `cd spike && .venv/Scripts/python -m pytest -q tests/test_playground_clips.py`;
   expect FAIL.
 - [ ] **Step 3: Implement**, render, and Read the sheets: the expressions must be visible at size 1.0.
 - [ ] **Step 4: Run** the test again; expect PASS. Then run `python -m puppy_sim check
