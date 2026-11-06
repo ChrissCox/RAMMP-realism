@@ -31,6 +31,7 @@ jobs:
             python3 -m pip install --upgrade "pip==24.3.1"
             python3 -m pip install /repo/puppy_motion
             python3 -m pip show puppy-motion
+            cd /tmp && python3 -I /repo/puppy_playground/scripts/ci_installed_smoke.py
             export PYTHONPATH="$PYTHONPATH:/repo/puppy_mode_ros"
             cd /repo && python3 -m pytest puppy_mode_ros/test -q
           '

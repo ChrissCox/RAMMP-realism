@@ -32,11 +32,11 @@ DUMMY = textwrap.dedent(
 
     def main():
         seen["argv"] = list(sys.argv)
-        seen["installed"] = getattr(Engine, "_puppy_installed", False)
+        seen["installed"] = getattr(Engine.execute, "_puppy_wrapped", False)
         e = Engine()
         seen["params"] = dict(e.params)
         seen["result"] = e.execute("go", {}, None)
-        return 0
+        return seen.get("rc", 0)
     """
 )
 
@@ -58,6 +58,18 @@ def test_launch_installs_then_runs_main_with_remaining_argv(dummy):
     assert seen["argv"] == ["dummy_engine_mod:main", "--ros-args", "-p", "x:=1"]
     assert seen["params"] == hook.PARAM_DEFAULTS
     assert seen["result"] == {"ran": "go"}  # puppy.enabled false: the original execute
+
+
+def test_launch_exit_code_follows_the_engine_entry_point(dummy):
+    import importlib
+
+    mod = importlib.import_module("dummy_engine_mod")
+    mod.seen["rc"] = None
+    assert launch.main(["dummy_engine_mod:Engine", "dummy_engine_mod:main"]) == 0
+    mod.seen["rc"] = {"not": "an int"}
+    assert launch.main(["dummy_engine_mod:Engine", "dummy_engine_mod:main"]) == 0
+    mod.seen["rc"] = 3
+    assert launch.main(["dummy_engine_mod:Engine", "dummy_engine_mod:main"]) == 3
 
 
 def test_launch_rejects_bad_specs(dummy):

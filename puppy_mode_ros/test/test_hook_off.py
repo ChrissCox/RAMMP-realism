@@ -211,3 +211,83 @@ def test_install_twice_wraps_once(env, monkeypatch):
     engine = env.make(cls, **{"puppy.enabled": True})
     env.run(engine)
     assert calls == ["run"]
+
+
+def test_subclass_of_an_installed_class_runs_hook_once(env, monkeypatch):
+    calls = []
+    monkeypatch.setattr(hook, "run", lambda e, a, p, c, original: calls.append(a) or original(e, a, p, c))
+    base = hook.install(make_capability())
+
+    class Sub(base):
+        pass
+
+    hook.install(Sub)
+    assert "execute" not in Sub.__dict__ and "__init__" not in Sub.__dict__
+    engine = env.make(Sub, **{"puppy.enabled": True})
+    assert env.run(engine).result.status == Result.STATUS_SUCCESS
+    assert calls == ["run"]
+
+
+def test_inherited_execute_is_wrapped_on_the_subclass_only(env, monkeypatch):
+    calls = []
+    monkeypatch.setattr(hook, "run", lambda e, a, p, c, original: calls.append(a) or original(e, a, p, c))
+    base = make_capability()
+
+    class Sub(base):
+        pass
+
+    hook.install(Sub)
+    assert "execute" in Sub.__dict__ and "execute" in base.__dict__
+    assert not getattr(base.execute, "_puppy_wrapped", False)
+    engine = env.make(Sub, **{"puppy.enabled": True})
+    assert env.run(engine).result.status == Result.STATUS_SUCCESS
+    assert calls == ["run"]
+
+
+def test_engine_that_declares_a_puppy_param_keeps_it(env, monkeypatch):
+    calls = []
+    monkeypatch.setattr(hook, "run", lambda e, a, p, c, original: calls.append(a) or original(e, a, p, c))
+
+    class Own(make_capability()):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.declare_parameter("puppy.preset", "demo")
+            self.declare_parameter("puppy.enabled", True)
+
+    engine = env.make(hook.install(Own))
+    assert engine.get_parameter("puppy.preset").value == "demo"  # not redeclared
+    assert engine.get_parameter("puppy.lock_on").value == "view"  # the rest are declared
+    assert env.run(engine).result.status == Result.STATUS_SUCCESS
+    assert calls == ["run"]  # the engine's own True is honoured
+
+
+def test_non_bool_flag_stays_off(env, monkeypatch):
+    calls = []
+    monkeypatch.setattr(hook, "run", lambda e, a, p, c, original: calls.append(a))
+
+    class Own(make_capability()):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.declare_parameter("puppy.enabled", "false")  # truthy, but not True
+
+    engine = env.make(hook.install(Own))
+    assert env.run(engine).result.status == Result.STATUS_SUCCESS
+    assert calls == []
+
+
+def test_unreadable_flag_runs_the_original_execute(env, monkeypatch):
+    calls = []
+    monkeypatch.setattr(hook, "run", lambda e, a, p, c, original: calls.append(a))
+    engine = env.make(hook.install(make_capability()))
+    real = engine.get_parameter
+
+    def broken(name):
+        if name == "puppy.enabled":
+            raise RuntimeError("boom")
+        return real(name)
+
+    monkeypatch.setattr(engine, "get_parameter", broken)
+    result = env.run(engine)
+    assert result.result.status == Result.STATUS_SUCCESS
+    assert json.loads(result.result.payload_json) == {"done": "run"}
+    assert calls == []

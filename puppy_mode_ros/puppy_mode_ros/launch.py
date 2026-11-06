@@ -26,7 +26,8 @@ def main(argv=None):
     engine_cls, engine_main, rest = resolve(argv[0]), resolve(argv[1]), argv[2:]
     hook.install(engine_cls)
     sys.argv = [argv[1], *rest]
-    return engine_main()
+    rc = engine_main()
+    return rc if isinstance(rc, int) else 0  # None (run() returns it) is success
 
 
 if __name__ == "__main__":
