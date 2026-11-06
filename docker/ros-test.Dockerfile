@@ -72,8 +72,6 @@ RUN git clone -q --filter=blob:none https://github.com/rammp-org/rammp-kitchen-c
     && git -C /tmp/rammp checkout -q ${RAMMP_REF} \
     && cp -r /tmp/rammp/capability_engine /opt/capability_engine && rm -rf /tmp/rammp
 
-COPY puppy_motion /opt/puppy_motion
-RUN pip install --no-cache-dir /opt/puppy_motion
 
 ENV PYTHONPATH=/opt/capability_engine:/opt/capability_engine/test:/repo/puppy_playground
 RUN printf '%s\n' '#!/bin/bash' \
