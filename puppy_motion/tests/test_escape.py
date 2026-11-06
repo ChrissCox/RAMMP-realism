@@ -51,3 +51,18 @@ def test_a_reversed_escape_path_keeps_caps_and_ends_but_not_the_forward_floors(c
     assert not rules & {"path_caps", "path_ends"}
     assert rules <= {"path_person_floor", "path_person_monotone", "path_obstacle"}
     assert len(rev) == len(path)
+
+
+def test_the_shipped_stage_pose_has_a_checked_escape_path_with_the_candidate_margin(chain, home):
+    import json
+    from pathlib import Path
+
+    from puppy_motion.escape import grown_scene
+    from puppy_motion.stage import stage_violations
+
+    doc = json.loads((Path(__file__).resolve().parents[2] / "puppy_playground/puppy_playground/data/stage_pose.json").read_text())
+    q = np.array(doc["q"])
+    assert stage_violations(chain, chair_scene(), q) == []
+    p = escape_path(chain, chair_scene(), home, q)
+    assert path_violations(p, chain, grown_scene(chair_scene(), 0.002)) == []
+    assert np.abs(p[-1][1] - q).max() < 1e-6 and "search_index" in doc
