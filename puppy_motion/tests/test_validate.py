@@ -23,8 +23,10 @@ TILT = (0.5, 1.5)
 
 
 def _points(q):
-    """A beat's points from its positions: velocities are the forward differences (zero at the end)."""
-    dq = np.vstack([np.diff(q, axis=0) / DT, np.zeros((1, q.shape[1]))])
+    """A beat's points from its positions: velocities are the central differences, exactly zero at
+    the first and last point (the convention in validate.py)."""
+    dq = np.zeros_like(q)
+    dq[1:-1] = (q[2:] - q[:-2]) / (2 * DT)
     return [(k * DT, q[k].copy(), dq[k]) for k in range(len(q))]
 
 
@@ -225,3 +227,93 @@ def test_unknown_preset_is_an_error(beat, home, chain, scene):
 def test_violation_carries_rule_sample_and_detail(beat, home, chain, scene):
     (v,) = check_beat(_points(_bump(beat, 6, 0.6, 0.8)), home, chain, scene, Zone.FREE)
     assert isinstance(v, Violation) and v.rule == "accel" and 0 < v.sample < len(beat) and v.detail
+
+
+# ------------------------------------------------------------- fix round 1
+Q_NEAR = np.array([0.729, -1.366, -3.789, -2.36, 0.134, -1.839, 2.231])  # head 0.267 m from the person
+EXCURSION = np.array([0.0422, -0.0231, 0.0596, 0.0653, -0.2585, -0.1003, -0.2496])
+
+
+def _excursion(q0, d, rest_s=0.5, seconds=3.0):
+    m = int(round(seconds / DT))
+    x = np.arange(m + 1) / m
+    s = 0.5 * (1 - np.cos(2 * np.pi * x))
+    rest = np.tile(q0, (int(round(rest_s / DT)), 1))
+    return np.vstack([rest, q0 + s[:, None] * d, rest])
+
+
+def test_a_held_container_counts_for_the_person_floor(chain, scene):
+    q = _excursion(Q_NEAR, EXCURSION)
+    assert clearances(chain, scene, Q_NEAR, True)[0, 3] < clearances(chain, scene, Q_NEAR, False)[0, 3]
+    assert "person" not in _rules(_points(q), Q_NEAR, chain, scene, Zone.FREE)  # unheld: it was fine
+    assert "person" in _rules(_points(q), Q_NEAR, chain, scene, Zone.FREE, held=True)
+
+
+def test_the_stricter_of_the_given_zone_and_near_user_applies(chain, scene):
+    # head within 0.35 m of the person at q_start: a beat composed as FREE is held to NEAR_USER's caps
+    q = _beat_q(Q_NEAR, chain, scene)
+    assert clearances(chain, scene, Q_NEAR, False)[0, 3] < 0.35
+    rules = _rules(_points(q), Q_NEAR, chain, scene, Zone.FREE)
+    assert set(rules) & {"speed", "accel"}
+    assert rules == _rules(_points(q), Q_NEAR, chain, scene, Zone.NEAR_USER)
+
+
+@pytest.mark.parametrize("caps", ["default", "snappy"])
+@pytest.mark.parametrize("name", ["shake_off", "wiggle"])
+def test_central_difference_velocities_pass_for_fast_behaviors(name, caps, home, chain, scene):
+    track = constant_track(home, REST_GRIP, 5.0, Zone.FREE)
+    ctx = Context.of(track, chain, scene, Targets(scene.person_head()), caps=caps)
+    q = compose(track, [getattr(B, name)(ctx, 0.5)], chain, scene, caps=caps).q
+    assert np.abs(q - home).max() > 0.01
+    assert check_beat(_points(q), home, chain, scene, Zone.FREE, caps=caps) == []
+
+
+def test_removing_the_rest_padding_would_be_caught(home, chain, scene):
+    # starts abruptly at 0.04 rad/s: a constant speed has no second difference, but 0.04/DT = 2 rad/s^2
+    # from rest is over NEAR_USER's 1.5
+    ease = 0.5 * (1 + np.cos(np.pi * np.arange(1, 41) / 40))  # then a gentle stop over 0.8 s
+    step = 0.04 * DT * np.concatenate([np.ones(10), ease])
+    q = np.tile(home, (len(step) + 1, 1))
+    q[1:, 6] += np.cumsum(step)  # (the end rule fires too; only the accel at sample 0 matters here)
+    vs = check_beat(_points(q), home, chain, scene, Zone.NEAR_USER)
+    assert any(v.rule == "accel" and v.sample == 0 for v in vs)
+
+
+def test_task_clearance_must_be_a_finite_2_by_4(beat, home, chain, scene):
+    pts = _points(beat)
+    task = clearances(chain, scene, home, False)
+    bad = task.copy()
+    bad[0, 0] = np.nan
+    assert _rules(pts, home, chain, scene, task_clearance=bad) == ["shape"]
+    bad = task.copy()
+    bad[1, 2] = np.nan
+    assert _rules(pts, home, chain, scene, task_clearance=bad) == ["shape"]
+    assert _rules(pts, home, chain, scene, task_clearance=task[0]) == ["shape"]  # (4,)
+    assert _rules(pts, home, chain, scene, task_clearance=np.ones((3, 4))) == ["shape"]
+    assert _rules(pts, home, chain, scene, task_clearance="x") == ["shape"]
+    assert _rules(pts, home, chain, scene, task_clearance=task) == []
+
+
+def test_a_person_row_without_a_finite_value_is_refused(beat, home, chain, scene):
+    task = clearances(chain, scene, home, False)
+    task[0] = np.inf
+    assert _rules(_points(beat), home, chain, scene, task_clearance=task) == ["person"]
+    no_person = Scene([], [])
+    assert "person" in _rules(_points(beat), home, chain, no_person)
+
+
+def test_a_nan_clearance_is_a_violation(beat, home, chain, scene):
+    nan_scene = Scene([Sphere([np.nan] * 3, 0.1)], [])
+    assert "person" in _rules(_points(beat), home, chain, nan_scene)
+
+
+def test_bad_arguments_are_shape_violations_not_exceptions(beat, home, chain, scene):
+    pts = _points(beat)
+    assert _rules(pts, home, chain, scene, zone="bogus") == ["shape"]
+    assert _rules(pts, home, chain, scene, zone=None) == ["shape"]
+    assert _rules(pts, "not a posture", chain, scene) == ["shape"]
+    assert _rules(pts, home[:6], chain, scene) == ["shape"]
+    assert _rules(pts, None, chain, scene) == ["shape"]
+    assert _rules(None, home, chain, scene) == ["shape"]
+    assert _rules([(0.0, home)] * 3, home, chain, scene) == ["shape"]
+    assert _rules([("a", home, home)] * 3, home, chain, scene) == ["shape"]
