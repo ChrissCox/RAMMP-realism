@@ -2,6 +2,7 @@
 the ones it asked for, and hook.run is never reached. With it true, hook.run is called once per
 goal and (until Task 13) its result is the original execute's. Each engine runs beside a FakeDriver."""
 
+import itertools
 import json
 import threading
 import time
@@ -72,18 +73,18 @@ def env(ros):
     spinner = threading.Thread(target=executor.spin, daemon=True)
     spinner.start()
     engines = []
-    engine_id = f"hook_off_engine_{id(fake)}"
+    ids = itertools.count()
 
     def make(cls, **params):
         overrides = [Parameter("use_orchestrator", value=False)]
         overrides += [Parameter(k, value=v) for k, v in params.items()]
-        engine = cls(engine_id, parameter_overrides=overrides)
+        engine = cls(f"hook_off_engine_{id(fake)}_{next(ids)}", parameter_overrides=overrides)
         engines.append(engine)
         executor.add_node(engine)
         return engine
 
     def run(engine):
-        client = ActionClient(client_node, ExecuteAction, f"/{engine_id}/execute_action")
+        client = ActionClient(client_node, ExecuteAction, f"/{engine.get_name()}/execute_action")
         try:
             assert client.wait_for_server(timeout_sec=WAIT_S)
             send = client.send_goal_async(ExecuteAction.Goal(action_id="run"))
