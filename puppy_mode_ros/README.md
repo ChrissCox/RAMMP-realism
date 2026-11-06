@@ -46,7 +46,7 @@ Beats play only at the task's boundaries. The `TaskRequested` beats are held unt
 move through `engine.arm` and play just before it (its own checks have passed by then); a task that
 never moves through `engine.arm` never plays them, and a goal the task refuses before moving moves
 nothing. `Succeeded` beats play after `execute` returns, and on a recoverable `EngineError` the
-`Failed` beats play, then the same error is re-raised. Any other exception, a cancel, an e-stop and
+`Failed` beats play (only once the task has moved), then the same error is re-raised. Any other exception, a cancel, an e-stop and
 a non-recoverable failure play nothing. A beat never changes the task's payload, and the ending
 beats never change its result: a cancel, e-stop or takeover that meets one is logged and the task's
 own success or error stands. During the task `engine.arm` is a proxy

@@ -87,6 +87,7 @@ class Player:
         self._warmed = False
         self._pending_phase = None  # the latest Phase that arrived when the player could not take it
         self._deferred = None  # an event held until the task's first move (see defer)
+        self.moved = False  # whether the task has made a move call through the proxy arm
 
     # -- what the proxies report ---------------------------------------------------------------
 
@@ -119,6 +120,7 @@ class Player:
         self._deferred = event
 
     def before_move(self):
+        self.moved = True
         deferred, self._deferred = self._deferred, None
         if deferred is not None:
             if self._phase != ("", "") and zone_of(self.capability, *self._phase).zone is Zone.PRECISION:

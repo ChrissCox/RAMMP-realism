@@ -145,7 +145,7 @@ def run(engine, action_id, params, ctx, original):
     The TaskRequested beats are deferred: they play just before the task's first move through
     engine.arm, when its own checks have passed (a task that never moves through engine.arm, like
     box_opening, never plays them). The Succeeded beats play after `original` returns; on a
-    recoverable EngineError the Failed(True) beats play and the same error is re-raised. Anything
+    recoverable EngineError, once the task has moved, the Failed(True) beats play and the same error is re-raised. Anything
     else propagates with no beats. The ending beats never change the task's result: a Cancelled,
     EStopped, ControlTaken or any other exception from them is logged and the payload is returned
     (or the original error re-raised) unchanged. During `original`, engine.arm is a PuppyArm and ctx
@@ -181,7 +181,7 @@ def run(engine, action_id, params, ctx, original):
         payload = original(engine, action_id, params, PuppyCtx(ctx, player.emit))
     except EngineError as error:
         engine.arm = real_arm
-        if error.recoverable:
+        if error.recoverable and player.moved:  # a goal refused before any move moves nothing
             ending(Failed(True))
         raise error
     finally:

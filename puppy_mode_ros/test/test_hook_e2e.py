@@ -321,7 +321,7 @@ def test_an_unknown_phase_plays_no_beat_in_it(env):
     seen = {}
     error = EngineError("lost_it", "dropped", recoverable=True)
     engine = env.make(
-        make_capability(env.fake, seen, phases=("renamed",), fail_in="renamed", error=error), **GRAB, **DEMO
+        make_capability(env.fake, seen, phases=("renamed",), move_in="renamed", fail_in="renamed", error=error), **GRAB, **DEMO
     )
     result = env.run(engine).result
     assert result.error_code == "lost_it"
