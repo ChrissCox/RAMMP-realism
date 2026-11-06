@@ -83,48 +83,48 @@ logs() { docker logs "$NAME" 2>&1; }
 has_log() { local l; l="$(logs)"; grep -q -- "$1" <<<"$l"; } # no pipe: pipefail + grep -q would SIGPIPE docker logs
 stop() { timeout 60 docker rm -f "$NAME" >/dev/null 2>&1 || true; STARTED=0; }
 
-send_goal() { # prints the client's output
-  timeout 120 docker exec "$NAME" /ros_entrypoint.sh ros2 action send_goal --feedback /box_opening/execute_action \
-    rammp_orchestrator_interfaces/action/ExecuteAction \
-    "{engine_id: box_opening, action_id: open_box, params_json: '{}'}" 2>&1
+send_goal() { # prints the client's output, each line led by the wall-clock second it arrived (the node log's stamps are the same clock)
+  timeout 120 docker exec -e PYTHONUNBUFFERED=1 "$NAME" /ros_entrypoint.sh ros2 action send_goal --feedback     /box_opening/execute_action rammp_orchestrator_interfaces/action/ExecuteAction     "{engine_id: box_opening, action_id: open_box, params_json: '{}'}" 2>&1     | while IFS= read -r line; do printf '%s %s
+' "$(date +%s.%N)" "$line"; done
 }
 
-# line numbers (in the container log) of the first/last progress line and of each beat that reached
-# the mock arm. The mock logs one line per phase; its words are in MOCK_PHASES (node.py).
+# A beat that reached the mock arm logs this line. The run's progress is the goal's feedback:
+# the "message:" lines of the client output (the mock plays its phases back to back).
 BEAT_PAT='execute_joint_trajectory: mock: not sent'
-PHASE_PAT='found the container|looking for the button|pressing the button|holding the lid|setting the lid down|letting go of the lid|going home'
 
 run_case() { # enabled
-  local enabled="$1" out lg first last beats before after outside
+  local enabled="$1" out lg first last stamps beats before during after
   start "$enabled"
   out="$(send_goal || true)"
   sleep 2
   lg="$(logs)"
   echo "---- goal output ($enabled):"; echo "$out" | tail -12
   echo "---- node log ($enabled), beat/puppy/phase lines:"
-  grep -nE "puppy|$BEAT_PAT|$PHASE_PAT" <<<"$lg" | head -60 || true
+  grep -nE "puppy|$BEAT_PAT" <<<"$lg" | head -60 || true
   if grep -q 'Goal finished with status: SUCCEEDED' <<<"$out" && grep -q '"mock": *true' <<<"$out"; then
     pass "puppy.enabled=$enabled: the goal SUCCEEDED with the mock payload"
   else
     fail "puppy.enabled=$enabled: the goal did not succeed with the mock payload"
   fi
-  first="$(grep -nE "$PHASE_PAT" <<<"$lg" | head -1 | cut -d: -f1 || true)"
-  last="$(grep -nE "$PHASE_PAT" <<<"$lg" | tail -1 | cut -d: -f1 || true)"
-  beats="$(grep -c -- "$BEAT_PAT" <<<"$lg" || true)"
+  # seconds of the first and last progress message, and of each beat (the node log's [ros_time] stamp)
+  first="$(grep -E '^[0-9.]+ +message:' <<<"$out" | head -1 | cut -d' ' -f1 || true)"
+  last="$(grep -E '^[0-9.]+ +message:' <<<"$out" | tail -1 | cut -d' ' -f1 || true)"
+  stamps="$(grep -- "$BEAT_PAT" <<<"$lg" | sed -E 's/^\[[A-Z]+\] \[([0-9]+\.[0-9]+)\].*/\1/' || true)"
+  beats="$(grep -c . <<<"$stamps" || true)"
   if [ "$enabled" = true ]; then
     if grep -q 'puppy mode off' <<<"$lg"; then fail "the hook did not engage: $(grep 'puppy mode off' <<<"$lg" | head -1)"
     else pass "the hook engaged (no 'puppy mode off')"; fi
     if [ "$beats" -ge 1 ]; then pass "$beats beat trajectory(ies) reached the mock arm (mock: not sent)"
     else fail "no beat reached the mock arm"; fi
     if [ -n "$first" ] && [ -n "$last" ]; then
-      outside="$(grep -n -- "$BEAT_PAT" <<<"$lg" | cut -d: -f1 | awk -v f="$first" -v l="$last" '$1 > f && $1 < l' | wc -l)"
-      after="$(grep -n -- "$BEAT_PAT" <<<"$lg" | cut -d: -f1 | awk -v l="$last" '$1 > l' | wc -l)"
-      [ "$outside" -eq 0 ] && pass "no beat between the first and last progress line (lines $first-$last)" \
-        || fail "$outside beat(s) between the first and last progress line"
-      [ "$after" -ge 1 ] && pass "$after beat(s) after the last progress line (the proud beat after the run)" \
-        || fail "no beat after the run's last progress line"
+      during="$(awk -v f="$first" -v l="$last" '$1 > f && $1 < l' <<<"$stamps" | wc -l)"
+      before="$(awk -v f="$first" '$1 <= f' <<<"$stamps" | wc -l)"
+      after="$(awk -v l="$last" '$1 >= l' <<<"$stamps" | wc -l)"
+      [ "$during" -eq 0 ] && pass "no beat between the first and last progress message"         || fail "$during beat(s) between the first and last progress message"
+      [ "$before" -ge 1 ] && pass "$before beat(s) before the run's first progress message (eager)"         || fail "no beat before the run (demo preset expects the eager beat)"
+      [ "$after" -ge 1 ] && pass "$after beat(s) after the run's last progress message (proud)"         || fail "no beat after the run's last progress message"
     else
-      fail "no progress lines found in the node log"
+      fail "no progress messages in the goal output"
     fi
   else
     [ "$beats" -eq 0 ] && pass "no beat reached the mock arm with puppy.enabled=false" \
