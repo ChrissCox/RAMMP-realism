@@ -19,17 +19,19 @@ URDF="${1:-}"
 IMAGE="${IMAGE:-puppy-playground}"
 PORT="${PORT:-8766}"
 NAME="${NAME:-puppy-playground-mock}"
+case "$NAME" in puppy-playground-mock*) ;; *) echo "SETUP FAIL: NAME must start with puppy-playground-mock (got $NAME)" >&2; exit 99 ;; esac
 BASE="http://127.0.0.1:$PORT"
 FAILS=0
 TMP=""
+STARTED=0  # set only after our own successful docker run: the trap removes nothing else
 
 die() { echo "SETUP FAIL: $*" >&2; exit 99; }
 
 cleanup() {
-  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  [ "$STARTED" = 1 ] && { timeout 60 docker rm -f "$NAME" >/dev/null 2>&1 || true; }
   if [ -n "$TMP" ] && [ -d "$TMP" ]; then
     # the container wrote as root: remove through a container
-    docker run --rm -v "$TMP":/d --entrypoint sh "$IMAGE" -c 'rm -rf /d/* /d/.[!.]*' >/dev/null 2>&1 || true
+    timeout 120 docker run --rm -v "$TMP":/d --entrypoint sh "$IMAGE" -c 'rm -rf /d/* /d/.[!.]*' >/dev/null 2>&1 || true
     rm -rf "$TMP" 2>/dev/null || true
   fi
 }
@@ -49,7 +51,7 @@ fi
 TMP="$(mktemp -d)"
 cp "$URDF" "$TMP/flatbot.urdf"
 echo "== making the approved stage-path fixture"
-docker run --rm -v "$TMP":/data "$IMAGE" python3 /module_ws/src/puppy_playground/scripts/make_mock_fixture.py \
+timeout 600 docker run --rm -v "$TMP":/data "$IMAGE" python3 /module_ws/src/puppy_playground/scripts/make_mock_fixture.py \
   /data/flatbot.urdf /data || die "could not make the stage-path fixture"
 [ -f "$TMP/stage_path.json" ] || die "no stage_path.json was written"
 
@@ -60,6 +62,7 @@ docker run -d --name "$NAME" --network host -v "$TMP":/data \
   "$IMAGE" ros2 launch puppy_playground playground.launch.py use_orchestrator:=false \
   mock:=true mock_urdf:=/data/flatbot.urdf "mock_joints:=$REST_Q" ui_port:="$PORT" >/dev/null \
   || die "docker run failed"
+STARTED=1
 
 # Only talk to it once it is shown to be the container we started.
 ENV_DUMP="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$NAME")"
@@ -69,13 +72,16 @@ grep -qx 'ROS_LOCALHOST_ONLY=1' <<<"$ENV_DUMP" || die "$NAME is not ROS_LOCALHOS
 
 logs() { docker logs "$NAME" 2>&1; }
 has_log() { local l; l="$(logs)"; grep -q -- "$1" <<<"$l"; } # no pipe: pipefail + grep -q would SIGPIPE docker logs
-for _ in $(seq 1 90); do
-  if has_log "playground UI on port $PORT" && curl -s -o /dev/null --max-time 2 "$BASE/status"; then break; fi
+# Ready = the engine logged "up (standalone, mock)" (it builds its model first, so it is the slow one),
+# the UI logged its port, and the UI has heard the engine's status ("state": "idle", so its action
+# server is discovered). Nothing arm-derived: the mock arm publishes no joint_states.
+ready=0
+for _ in $(seq 1 120); do
+  if has_log "up (standalone, mock)" && has_log "playground UI on port $PORT"      && grep -q '"state": "idle"' <<<"$(curl -s --max-time 2 "$BASE/status" || true)"; then ready=1; break; fi
   [ "$(docker inspect -f '{{.State.Running}}' "$NAME")" = true ] || { logs | tail -30; die "$NAME exited"; }
   sleep 1
 done
-has_log "playground UI on port $PORT" || die "the UI did not start in 90 s"
-has_log "up (standalone, mock)" || { logs | tail -30; die "the engine did not report standalone, mock mode"; }
+[ "$ready" = 1 ] || { logs | tail -30; die "engine and UI were not both up and connected in 120 s"; }
 echo "== $NAME is up and is in mock mode"
 
 pass() { echo "PASS  $1"; }
@@ -83,12 +89,12 @@ fail() { echo "FAIL  $1"; FAILS=$((FAILS + 1)); }
 
 post_code() { # path [json]
   curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 'Content-Type: application/json' \
-    -d "${2:-{\}}" "$BASE$1"
+    -d "${2:-{\}}" "$BASE$1" || echo 000
 }
 check() { # name, wanted codes, method, path, [json]
   local name="$1" want="$2" method="$3" path="$4" body="${5:-}" code
   if [ "$method" = GET ]; then
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$BASE$path")"
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$BASE$path" || echo 000)"
   else
     code="$(post_code "$path" "$body")"
   fi
@@ -120,7 +126,7 @@ accepted_and_built() { # name, path, json: 200, finishes with no refusal, and a 
 check "page"      "200" GET /
 check "status"    "200" GET /status
 check "unknown path" "404" GET /nope
-code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST -d 'name=nod' "$BASE/express")"
+code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST -d 'name=nod' "$BASE/express" || echo 000)"
 [ "$code" = 415 ] && pass "form POST refused (POST /express -> 415)" || fail "form POST refused (-> $code, wanted 415)"
 check "express (bad name)"  "400" POST /express '{"name":"no_such_thing"}'
 check "combo (bad)"         "400" POST /combo   '{"names":[]}'

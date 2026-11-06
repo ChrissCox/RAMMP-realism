@@ -20,7 +20,15 @@ nice docker build -f puppy_playground/Dockerfile -t puppy-playground .
 mkdir -p ~/puppy-data
 ```
 
-Build context is the repo root. The build does not touch the sheppy containers. arm64 only.
+Build context is the repo root. The image's entrypoint script replaces the base image's. Compare, and
+tell the agent if the base sets anything the script does not (environment exports, other setup):
+
+```
+docker image inspect ghcr.io/rammp-org/rammp-base:nightly-20261030 --format '{{json .Config.Entrypoint}} {{json .Config.Env}}'
+docker image inspect puppy-playground --format '{{json .Config.Entrypoint}}'
+```
+
+ The build does not touch the sheppy containers. arm64 only.
 
 ## 2. Copy the live stack's ROS settings and save the arm's URDF (nothing moves)
 
@@ -29,7 +37,7 @@ sheppy containers, so copy their settings from one of them:
 
 ```
 docker ps --format '{{.Names}}'                      # pick one sheppy container, call it <name>
-docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' <name>     | grep -E '^(ROS_|RMW_|CYCLONEDDS|FASTRTPS)' > ~/puppy-env.list
+docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' <name> \n    | grep -E '^(ROS_|RMW_|CYCLONEDDS|FASTRTPS)' > ~/puppy-env.list
 cat ~/puppy-env.list
 ```
 
@@ -41,7 +49,7 @@ path>:ro` to the `docker run` commands below. The real containers below also use
 Save the arm's URDF (a read-only subscription to `/arm/robot_description`) for the mock run:
 
 ```
-docker run --rm --network host --ipc host --env-file ~/puppy-env.list puppy-playground     python3 /module_ws/src/puppy_playground/scripts/dump_urdf.py > ~/puppy-data/flatbot.urdf
+docker run --rm --network host --ipc host --env-file ~/puppy-env.list puppy-playground \n    python3 /module_ws/src/puppy_playground/scripts/dump_urdf.py > ~/puppy-data/flatbot.urdf
 head -c 200 ~/puppy-data/flatbot.urdf
 ```
 
@@ -76,7 +84,7 @@ container with `plan_only:=true`:
 
 ```
 sheppy up flatbot_empty_world      # rammp-deployments PR #150 branch
-docker run --rm --network host --ipc host --env-file ~/puppy-env.list -v ~/puppy-data:/data     --name puppy puppy-playground     ros2 launch puppy_playground playground.launch.py use_orchestrator:=false plan_only:=true
+docker run --rm --network host --ipc host --env-file ~/puppy-env.list -v ~/puppy-data:/data \n    --name puppy puppy-playground \n    ros2 launch puppy_playground playground.launch.py use_orchestrator:=false plan_only:=true
 ```
 
 Attended: hand on the e-stop, nobody in the chair, the arm at rest. Open `http://<snorlax>:8080/` and
@@ -118,7 +126,7 @@ cp ~/puppy-data/stage_path.candidate.json ~/puppy-data/stage_path.json
 ## 6. Attended motion: `sheppy up flatbot`, the real container, no `plan_only`
 
 ```
-docker run --rm --network host --ipc host --env-file ~/puppy-env.list -v ~/puppy-data:/data     --name puppy puppy-playground     ros2 launch puppy_playground playground.launch.py use_orchestrator:=false
+docker run --rm --network host --ipc host --env-file ~/puppy-env.list -v ~/puppy-data:/data \n    --name puppy puppy-playground \n    ros2 launch puppy_playground playground.launch.py use_orchestrator:=false
 ```
 
 Nobody in the chair, you on the chair's right side by the joystick, hand on the e-stop. Open
