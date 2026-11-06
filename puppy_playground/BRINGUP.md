@@ -86,6 +86,41 @@ Expect `ALL PASS` and exit status 0. This shows each action reached `execute_joi
 checked trajectory; mock mode returns there, before any ROS goal is built. Building the goal is covered
 by the CI FakeDriver tests, and the driver accepting a real goal is only checked at step 6.1. A failure prints the reason; do not go on until it passes.
 
+## Choosing a home pose (read-only, nothing moves)
+
+Before step 4, check whether the playground can work from the pose the arm is parked at. Park the arm
+(attended, still), save the URDF as in step 2, then:
+
+```
+docker run --rm --network host --ipc host --env-file ~/puppy-env.list -v ~/puppy-data:/data \
+    -v ~/rammp-deployments/december_2026/config/dds/cyclonedds.xml:/etc/cyclonedds/config.xml:ro \
+    --entrypoint python3 puppy-playground /module_ws/src/puppy_playground/scripts/check_home.py
+```
+
+It takes one `/joint_states` reading (a read-only subscription; it refuses if the arm is moving or
+nothing arrives in 10 s), or use `--q "[7 joint angles in rad]"` to try a pose without the arm there
+(add `-v ~/puppy-data:/data` as above for `/data/flatbot.urdf`, or `--urdf <file>`). Read the output top
+to bottom:
+
+1. The pose in degrees, signed and 0-360.
+2. The start gate, exactly as Plan stage computes it: each part's distance from the chair occupant and
+   from obstacles against its minimum, and the joint limits and guards. FAIL means Plan stage would
+   refuse with `bad_start`.
+3. Each offline planner (`min_jerk`, `escape`, `via`): PASS with its duration, or the first rule it
+   breaks. cuRobo needs the live planner and is not tried here, so Plan stage may find a route this
+   check does not.
+
+Exit status 0: gate and a planner pass. 2: the gate fails. 3: no offline planner passes.
+
+Today's lesson: exact Kinova Home ([0, 15, 180, 230, 0, 55, 90] deg) gives no local route, and the tested
+park [11.7, -7.9, -176.2, -126.5, -17.0, 55.0, 90.0] deg does (`via`). Keep the upper arm well clear of
+the occupant box.
+
+A pose that passes can be planned with Plan stage in step 4, or its candidate written directly by adding
+`--write-candidate` (it saves `/data/stage_path.candidate.json` as Plan stage does and prints the file's
+sha256); then render and approve it as in step 5. `--ignore-start-gate` is the attended operator's call:
+it skips only the gate (and prints a loud line saying so); every path rule still applies.
+
 ## 4. Plan the stage path (no motion; `plan_only`)
 
 `plan_stage` needs the chair-only scene, so switch profiles first, and only then start the real
