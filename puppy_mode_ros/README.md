@@ -9,12 +9,12 @@ wraps the capability class's `execute`, and the wrapper does nothing unless `pup
 Run the engine through the launcher instead of its own entry point:
 
 ```
-python3 -m puppy_mode_ros.launch box_opening.node:<EngineClass> box_opening.node:main \
+python3 -m puppy_mode_ros.launch box_opening.node:Capability box_opening.node:main \
     --ros-args -p puppy.enabled:=true -p puppy.person_zone:=flatbot -p puppy.preset:=subtle
 ```
 
-`<EngineClass>` is the `CapabilityEngine` subclass in box_opening's `node.py`; its name is a
-placeholder here, Task 14 fills it in. The launcher installs the hook on that class, then calls the
+`Capability` is the `CapabilityEngine` subclass in box_opening's `node.py` (its `main()` is
+`run(Capability)`). The launcher installs the hook on that class, then calls the
 engine's own `main` with the remaining arguments. With `puppy.enabled` false (the default) every goal
 runs the original `execute` unchanged.
 
