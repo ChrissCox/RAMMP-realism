@@ -79,6 +79,20 @@ def _scene(text):
     return Scene.from_param(text)
 
 
+def _targets(scene):
+    """Targets for `scene`. The person's head is its highest sphere; a scene of boxes only (the
+    flatbot chair layers) has none, so it is the centre of the person's highest box."""
+    from puppy_motion.behaviors import Targets
+
+    try:
+        return Targets.from_scene(scene)
+    except ValueError:
+        boxes = [b for b in scene.person if hasattr(b, "half")]
+        if not boxes:
+            raise
+        return Targets(person_head=max(boxes, key=lambda b: b.center[2]).center.copy())
+
+
 def _capability(engine, rules):
     """The key of `rules` for this engine: its id, else the root module of its class."""
     name = engine.get_name()
@@ -91,7 +105,6 @@ def _capability(engine, rules):
 def _setup(engine, log):
     """(capability, director, chain, scene) for this goal, or None (logged) to run without Puppy
     Mode. Cancelled, EStopped and ControlTaken propagate."""
-    from puppy_motion.behaviors import Targets
     from puppy_motion.director import Director, load_rules
     from puppy_motion.urdf import Chain
 
@@ -114,7 +127,7 @@ def _setup(engine, log):
             capability,
             chain,
             scene,
-            Targets.from_scene(scene),
+            _targets(scene),
             preset=_param(engine, "puppy.preset"),
             lock_on=_param(engine, "puppy.lock_on"),
         )

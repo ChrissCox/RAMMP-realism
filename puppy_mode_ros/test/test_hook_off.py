@@ -22,7 +22,7 @@ from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from rclpy.serialization import serialize_message
+from rosidl_runtime_py.convert import message_to_ordereddict
 
 from puppy_mode_ros import hook
 
@@ -118,7 +118,7 @@ def sent(fake):
         for goal in goals:
             goal = copy.copy(goal)
             goal.sender_id = ""
-            out.setdefault(name, []).append(serialize_message(goal))
+            out.setdefault(name, []).append(dict(message_to_ordereddict(goal)))  # not CDR bytes: padding differs
     return out
 
 

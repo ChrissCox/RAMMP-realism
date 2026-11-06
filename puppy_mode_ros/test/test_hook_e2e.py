@@ -261,3 +261,11 @@ def test_held_is_fail_safe():
     assert hook.held_source(engine_with(reading(0.0, present=False)))() is True
     assert hook.held_source(engine_with(missing))() is True
     assert hook.held_source(SimpleNamespace(arm=SimpleNamespace()))() is True
+
+
+def test_flatbot_scene_has_a_head_target():
+    """The chair layers are boxes only: the head is the person's highest box (the layer's "head")."""
+    import numpy as np
+
+    targets = hook._targets(hook._scene("flatbot"))
+    assert np.allclose(targets.person_head, [-0.01895, -0.36, 0.87885])
