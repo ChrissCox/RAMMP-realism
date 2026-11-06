@@ -123,6 +123,18 @@ accepted_and_built() { # name, path, json: 200, finishes with no refusal, and a 
   else fail "$name: no goal reached the mock arm"; fi
 }
 
+refused_with() { # name, path, json, error_code: 200, then refused with that code and no new goal
+  local name="$1" path="$2" body="$3" want="$4" before after st
+  before="$(mock_goals)"
+  check "$name" "200" POST "$path" "$body"
+  if ! idle; then fail "$name did not finish in 120 s"; return; fi
+  st="$(curl -s --max-time 5 "$BASE/status")"
+  if grep -q "\"error_code\": \"$want\"" <<<"$st"; then pass "$name: refused $want"
+  else fail "$name: wanted refusal $want, got: $st"; fi
+  after="$(mock_goals)"
+  if [ "$after" -eq "$before" ]; then pass "$name: no goal sent"; else fail "$name: a goal was sent ($before -> $after)"; fi
+}
+
 check "page"      "200" GET /
 check "status"    "200" GET /status
 check "unknown path" "404" GET /nope
@@ -134,7 +146,10 @@ check "combo (bad)"         "400" POST /combo   '{"names":[]}'
 # the mock arm starts at the rest pose with an approved path: these build real goals
 accepted_and_built "stage"   /stage
 accepted_and_built "express" /express '{"name":"head_tilt","size":0.25}'
-accepted_and_built "combo"   /combo   '{"names":["nod","wag"],"size":0.25}'
+# no /gripper_state on the isolated domain: a stale gripper counts as holding (fail-safe), so the
+# combo uses beats allowed while holding, and wag (muted while holding) must be refused no_beat
+accepted_and_built "combo"   /combo   '{"names":["nod","perk"],"size":0.25}'
+refused_with "express wag (muted: no gripper state counts as holding)" /express '{"name":"wag","size":0.25}' no_beat
 accepted_and_built "rest"    /rest
 check "recover (at rest)"    "200" POST /recover; idle || fail "recover did not finish"
 check "plan_stage"           "200" POST /plan_stage; idle || fail "plan_stage did not finish"
