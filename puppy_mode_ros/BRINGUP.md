@@ -1,8 +1,8 @@
 # Box opening with Puppy Mode: attended test on flatbot
 
-Puppy Mode is experimental. Here it plays at most two small beats around one box-opening run:
-an eager beat before the run starts (demo preset only) and a proud beat after a success. Nothing
-plays during the run: box_opening runs its motion in a subprocess, and Puppy Mode waits for it.
+Puppy Mode is experimental. Here it plays at most one small beat around one box-opening run: a
+proud beat after a success, under both presets. Nothing plays before or during the run, and nothing
+after a failure: box_opening runs its motion in a subprocess, and Puppy Mode waits for it.
 Nothing in RAMMP's repos, the box_opening repo, the sheppy manifest or the profiles changes.
 
 ## Standing rules
@@ -48,7 +48,7 @@ would both serve `/box_opening/execute_action`.
 
 The same `docker run` as the manifest's `box_opening_v2`, with the `-puppy` image, the launcher as
 the command and the node's params as ROS args. Run from `~/rammp-deployments/december_2026` (the
-volumes are relative to it). First run, `subtle`: only the proud beat after a success.
+volumes are relative to it). First run, `subtle`: the proud beat after a success.
 
 ```
 docker run --rm --name puppy-box-opening --network host --ipc host --user 1000:1000 \
@@ -68,16 +68,16 @@ It is foreground (Ctrl+C stops it cleanly; STOPSIGNAL is SIGINT). The log shows 
 if Puppy Mode could not engage, a line `puppy mode off: <reason>` (the run then goes on without
 it). Then send the goal as usual (the `open_box` sheppy node, or your own `ros2 action send_goal`).
 
-Second run: the same command with `-p puppy.preset:=demo` (eager beat before the run, proud after
-a success). Only after the first run looked right.
+Second run: the same command with `-p puppy.preset:=demo` (the same single proud after a success).
+Only after the first run looked right.
 
 ## 3. What to watch
 
-- Demo only: one small beat just after the goal is accepted and before the run starts.
+- Nothing before the run starts (box_opening never moves through the arm interface).
 - Nothing during the run (locate, look, press, grip, carry, release, home). Any arm motion that
   is not box opening's own is a failure: e-stop.
-- After a success: a proud beat at the end pose. After a recoverable failure the sorry beats
-  (not a success: no proud).
+- After a success: one proud beat at the end pose. It is tiny at the Flatbot rest pose (a few
+  millimetres): an almost invisible proud is not a hook failure. After a failure: nothing.
 - Log lines starting `puppy:` say what was skipped and why (for example `skip <beat>: ...`);
   `puppy: ...; no more beats this action` means Puppy Mode switched itself off for that run and
   the run was unaffected.

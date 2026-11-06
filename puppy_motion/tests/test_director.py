@@ -254,9 +254,8 @@ def test_box_opening_rows_and_zones():
         ("TaskRequested", "eager", 5, None), ("Succeeded", "proud", 6, None), ("Succeeded", "attentive", 1, None),
         ("Failed", "sorry", 6, True), ("Failed", "shake_off", 4, True),
     ]
-    for phase in ("locate", "look", "press", "grip", "carry", "release"):
+    for phase in ("locate", "look", "press", "grip", "carry", "release", "home"):
         assert zone_of("box_opening", phase, "anything").zone is Zone.PRECISION
-    assert zone_of("box_opening", "home", "anything").zone is Zone.FREE
     assert zone_of("box_opening", "renamed", "anything").zone is Zone.PRECISION
 
 
@@ -279,3 +278,12 @@ def test_box_opening_moves_get_nothing_even_without_a_phase(chain, scene, target
     d = make(chain, scene, targets, "box_opening")
     assert d.on_event(BeforeMove(False), home, False) == []
     assert d.on_event(AfterMove(), home, False) == []
+
+
+def test_box_opening_aborted_home_gets_no_sorry_and_a_precision_phase_still_gets_proud(chain, scene, targets, home):
+    f = make(chain, scene, targets, "box_opening")
+    f.on_event(Phase("home", "going home: stopped"), home, False)
+    assert f.on_event(Failed(True), home, False) == []
+    d = make(chain, scene, targets, "box_opening")
+    d.on_event(Phase("release", "x"), home, False)
+    assert [b.name for b in d.on_event(Succeeded(), home, False)][:1] == ["proud"]

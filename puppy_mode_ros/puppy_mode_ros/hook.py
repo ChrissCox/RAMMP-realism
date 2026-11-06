@@ -142,10 +142,14 @@ def _setup(engine, log):
 def run(engine, action_id, params, ctx, original):
     """Puppy Mode on, for one goal: the original execute, with reactions at its boundaries.
 
-    TaskRequested beats play before `original`; the Succeeded beats after it returns; a recoverable
-    EngineError plays the Failed(True) beats and is re-raised (the same object). Anything else
-    propagates with no beats. During `original`, engine.arm is a PuppyArm and ctx a PuppyCtx; both
-    are restored in a finally. The task's payload is never touched."""
+    The TaskRequested beats are deferred: they play just before the task's first move through
+    engine.arm, when its own checks have passed (a task that never moves through engine.arm, like
+    box_opening, never plays them). The Succeeded beats play after `original` returns; on a
+    recoverable EngineError the Failed(True) beats play and the same error is re-raised. Anything
+    else propagates with no beats. The ending beats never change the task's result: a Cancelled,
+    EStopped, ControlTaken or any other exception from them is logged and the payload is returned
+    (or the original error re-raised) unchanged. During `original`, engine.arm is a PuppyArm and ctx
+    a PuppyCtx; both are restored in a finally."""
     log = engine.get_logger().info
     try:
         from puppy_mode_ros.player import Player
@@ -162,18 +166,27 @@ def run(engine, action_id, params, ctx, original):
     player = Player(
         real_arm, ctx, director, chain, scene, capability=capability, held=held_source(engine), log=log
     )
-    player.emit(TaskRequested())
+    player.defer(TaskRequested())
     engine.arm = PuppyArm(real_arm, player)
+
+    def ending(event):
+        try:
+            player.emit(event)
+        except BaseException as error:  # noqa: BLE001  (the task's own result stands)
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                raise
+            log(f"puppy: {type(error).__name__} during the {type(event).__name__} beats; the task's own result stands")
+
     try:
         payload = original(engine, action_id, params, PuppyCtx(ctx, player.emit))
     except EngineError as error:
         engine.arm = real_arm
         if error.recoverable:
-            player.emit(Failed(True))
+            ending(Failed(True))
         raise error
     finally:
         engine.arm = real_arm
-    player.emit(Succeeded())
+    ending(Succeeded())
     return payload
 
 

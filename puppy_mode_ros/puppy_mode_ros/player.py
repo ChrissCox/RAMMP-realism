@@ -86,6 +86,7 @@ class Player:
         self._grip_logged = False
         self._warmed = False
         self._pending_phase = None  # the latest Phase that arrived when the player could not take it
+        self._deferred = None  # an event held until the task's first move (see defer)
 
     # -- what the proxies report ---------------------------------------------------------------
 
@@ -112,7 +113,18 @@ class Player:
         """The task's own move failed (possible contact): no more beats this action."""
         self._disable(f"the task's move failed ({why})")
 
+    def defer(self, event):
+        """Hold `event` (TaskRequested) until the task's first move through the proxy arm, and
+        play it just before that move. A task that never moves through the proxy never plays it."""
+        self._deferred = event
+
     def before_move(self):
+        deferred, self._deferred = self._deferred, None
+        if deferred is not None:
+            if self._phase != ("", "") and zone_of(self.capability, *self._phase).zone is Zone.PRECISION:
+                self.log("puppy: the first move starts in a PRECISION phase: no beat before it")
+            else:
+                self.emit(deferred)
         entry = zone_of(self.capability, *self._phase)
         self.emit(BeforeMove(bool(entry.precise_end)))
 

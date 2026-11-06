@@ -114,15 +114,15 @@ run_case() { # enabled
   if [ "$enabled" = true ]; then
     if grep -q 'puppy mode off' <<<"$lg"; then fail "the hook did not engage: $(grep 'puppy mode off' <<<"$lg" | head -1)"
     else pass "the hook engaged (no 'puppy mode off')"; fi
-    if [ "$beats" -ge 1 ]; then pass "$beats beat trajectory(ies) reached the mock arm (mock: not sent)"
-    else fail "no beat reached the mock arm"; fi
+    if [ "$beats" -eq 1 ]; then pass "1 beat trajectory reached the mock arm (mock: not sent)"
+    else fail "$beats beat trajectories reached the mock arm (expected 1)"; fi
     if [ -n "$first" ] && [ -n "$last" ]; then
       during="$(awk -v f="$first" -v l="$last" '$1 > f && $1 < l' <<<"$stamps" | wc -l)"
       before="$(awk -v f="$first" '$1 <= f' <<<"$stamps" | wc -l)"
       after="$(awk -v l="$last" '$1 >= l' <<<"$stamps" | wc -l)"
       [ "$during" -eq 0 ] && pass "no beat between the first and last progress message"         || fail "$during beat(s) between the first and last progress message"
-      [ "$before" -ge 1 ] && pass "$before beat(s) before the run's first progress message (eager)"         || fail "no beat before the run (demo preset expects the eager beat)"
-      [ "$after" -ge 1 ] && pass "$after beat(s) after the run's last progress message (proud)"         || fail "no beat after the run's last progress message"
+      [ "$before" -eq 0 ] && pass "no beat before the run's first progress message"         || fail "$before beat(s) before the run's first progress message (box_opening expects none)"
+      [ "$after" -eq 1 ] && pass "exactly one beat after the run's last progress message (proud)"         || fail "$after beat(s) after the run's last progress message (expected exactly 1)"
     else
       fail "no progress messages in the goal output"
     fi

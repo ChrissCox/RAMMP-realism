@@ -39,9 +39,8 @@ button_press:
   - {phase: done, message: done, zone: FREE}
   - {phase: done, message: "dry run: nothing moved", zone: FREE}
 
-# box_opening runs in a subprocess, so no move is expressive: six phases are precise. "home" is FREE: the
-# capability has no Phase or Move rules, so nothing plays during the run either way, and a PRECISION last
-# phase would suppress the Succeeded reaction after the run has ended at home.
+# box_opening runs in a subprocess, so no move is expressive: every phase is PRECISION (Succeeded is not
+# phase-gated, so the proud still plays after the run; a Failed(True) in any phase plays nothing).
 box_opening:
   - {phase: locate, any_message: true, zone: PRECISION}
   - {phase: look, any_message: true, zone: PRECISION}
@@ -49,4 +48,4 @@ box_opening:
   - {phase: grip, any_message: true, zone: PRECISION}
   - {phase: carry, any_message: true, zone: PRECISION}
   - {phase: release, any_message: true, zone: PRECISION}
-  - {phase: home, any_message: true, zone: FREE}
+  - {phase: home, any_message: true, zone: PRECISION}

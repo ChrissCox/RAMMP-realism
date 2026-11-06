@@ -38,20 +38,24 @@ engine's name, then by the root module of its class.
   layers of the Flatbot chair setup.
 - A JSON object: `{"person": {...}, "obstacles": {...}}`, each with optional `spheres`
   (`[x, y, z, r]`), `capsules` (`[ax, ay, az, bx, by, bz, r]`) and `boxes` (`[cx, cy, cz, hx, hy, hz]`),
-  in the arm's base frame, metres. `person` needs at least one sphere (the head).
+  in the arm's base frame, metres. `person` needs at least one shape; its head is its highest sphere, else the centre of its highest box.
 
 ## What plays, and when
 
-Beats play only at the task's boundaries: `TaskRequested` beats before the original `execute`,
-`Succeeded` beats after it returns, and on a recoverable `EngineError` the `Failed` beats, then the
-same error is re-raised. Any other exception, a cancel, an e-stop and a non-recoverable failure
-play nothing. A beat never changes the task's payload. During the task `engine.arm` is a proxy
+Beats play only at the task's boundaries. The `TaskRequested` beats are held until the task's first
+move through `engine.arm` and play just before it (its own checks have passed by then); a task that
+never moves through `engine.arm` never plays them, and a goal the task refuses before moving moves
+nothing. `Succeeded` beats play after `execute` returns, and on a recoverable `EngineError` the
+`Failed` beats play, then the same error is re-raised. Any other exception, a cancel, an e-stop and
+a non-recoverable failure play nothing. A beat never changes the task's payload, and the ending
+beats never change its result: a cancel, e-stop or takeover that meets one is logged and the task's
+own success or error stands. During the task `engine.arm` is a proxy
 and `ctx` a wrapper, both restored in a `finally`.
 
 For box_opening the motion runs in a subprocess, so its phases (locate, look, press, grip, carry,
-release, home) never trigger a beat: only the boundary beats play (the last phase, home, is FREE so
-the success reaction is not suppressed). Under `subtle` that is at most one beat before and one
-proud after.
+release, home) are all PRECISION and never trigger a beat, and it never moves through `engine.arm`, so
+nothing plays before or during the run. After a success exactly one proud plays, under both presets
+(it is expected to be tiny at the Flatbot rest pose). A failure plays nothing.
 
 ## Safety and the attended-hardware rules
 
@@ -64,8 +68,8 @@ with the task's own control mode and gains (box_opening: impedance "default").
 Fail-safes: if the gripper state is missing, stale, not present or NaN the container counts as held
 and beats near the person are muted; a failed task move, a refused or aborted beat, an unreadable
 state, or no trajectory action server within 2 s disables Puppy Mode for the rest of that action,
-and the task goes on. An e-stop, a takeover or a cancel meeting a beat ends the action as it would
-without Puppy Mode.
+and the task goes on. An e-stop, a takeover or a cancel meeting a beat before the task or during it
+ends the action as it would without Puppy Mode; one meeting an ending beat leaves the task's result.
 
 Rules for running it on the real arm:
 

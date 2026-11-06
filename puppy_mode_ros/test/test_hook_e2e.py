@@ -10,9 +10,11 @@ import threading
 import time
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import rclpy
-from capability_engine.engine import Action, CapabilityEngine, EngineError
+from capability_engine.driver_state import ControlTaken, EStopped
+from capability_engine.engine import Action, Cancelled, CapabilityEngine, EngineError
 from fake_driver import FakeDriver
 from rammp_orchestrator_interfaces.action import ExecuteAction
 from rammp_orchestrator_interfaces.msg import Result
@@ -42,9 +44,14 @@ def wait_until(condition, timeout_s=WAIT_S):
         time.sleep(0.01)
 
 
-def make_capability(fake, seen, fail_in=None, error=None):
-    """A fresh box_opening-like class per test. `seen` collects what the task saw; the task raises
-    `error` when it reaches phase `fail_in`."""
+def make_capability(fake, seen, fail_in=None, error=None, phases=PHASES, move_in=None, error_at_start=None):
+    """A fresh scripted class per test. `seen` collects what the task saw. The task raises `error`
+    when it reaches phase `fail_in` (after the move, if that is the phase `move_in`), and
+    `error_at_start` before doing anything. With `move_in` it moves through self.arm (to where it
+    already is) right after reporting that phase; without, like box_opening, it never does."""
+
+    def count():
+        return len(fake.goals.get(EXECUTE, []))
 
     class Capability(CapabilityEngine):
         actions = [Action("run", "Run")]
@@ -52,13 +59,20 @@ def make_capability(fake, seen, fail_in=None, error=None):
         def execute(self, action_id, params, ctx):
             seen["arm_type"] = type(self.arm).__name__
             seen["ctx_type"] = type(ctx).__name__
-            seen["at_start"] = len(fake.goals.get(EXECUTE, []))
-            for i, phase in enumerate(PHASES):
-                ctx.progress(phase, i / len(PHASES), "")
-                seen.setdefault("at_first_progress", len(fake.goals.get(EXECUTE, [])))
+            seen["at_start"] = count()
+            if error_at_start is not None:
+                raise error_at_start
+            for i, phase in enumerate(phases):
+                ctx.progress(phase, i / len(phases), "")
+                seen.setdefault("at_first_progress", count())
+                if phase == move_in:
+                    seen["before_move"] = count()
+                    self.arm.go_to_joint_config(np.array(START))
+                    seen["after_move"] = count()
                 if phase == fail_in:
+                    seen["at_raise"] = count()
                     raise error
-            seen["at_end"] = len(fake.goals.get(EXECUTE, []))
+            seen["at_end"] = count()
             return {"done": action_id}
 
     return Capability
@@ -155,11 +169,10 @@ def test_box_opening_success_plays_boundary_beats_only(env):
     assert seen["arm_type"] == "PuppyArm" and seen["ctx_type"] == "PuppyCtx"
     assert engine.arm is arm_before  # restored
 
-    before = seen["at_start"]
-    assert before <= 1  # eager, or nothing when the subtle budget keeps the room for the proud
-    # no beat goal between the first progress call and execute's return
-    assert seen["at_first_progress"] == before == seen["at_end"]
-    assert len(goals(env)) == before + 1  # exactly one proud after
+    # box_opening never moves through self.arm: no eager (its beat waits for a first move that
+    # never comes), no beat goal between the first progress call and execute's return, one proud
+    assert seen["at_start"] == seen["at_first_progress"] == seen["at_end"] == 0
+    assert len(goals(env)) == 1
     assert sum(duration_s(g) for g in goals(env)) <= SUBTLE_BUDGET_S + 1e-6
     assert all(math.isfinite(p) for g in goals(env) for p in g.trajectory.points[-1].positions)
 
@@ -171,7 +184,7 @@ def test_recoverable_failure_in_a_precision_phase_gets_no_beat_and_the_same_erro
     result = env.run(engine).result
     assert result.status == Result.STATUS_FAILED
     assert result.error_code == "press_failed" and result.recoverable is True
-    assert len(goals(env)) == seen["at_start"] <= 1  # the "before" beat at most, nothing after
+    assert len(goals(env)) == 0  # no eager, and no sorry from a PRECISION phase
     assert type(engine.arm).__name__ != "PuppyArm"
 
 
@@ -269,3 +282,98 @@ def test_flatbot_scene_has_a_head_target():
 
     targets = hook._targets(hook._scene("flatbot"))
     assert np.allclose(targets.person_head, [-0.01895, -0.36, 0.87885])
+
+
+GRAB = dict(name="grab_container")
+DEMO = dict(on(), **{"puppy.preset": "demo"})
+
+
+def test_a_goal_refused_before_its_first_move_moves_nothing(env):
+    seen = {}
+    error = EngineError("not_allowed", "refused", recoverable=True)
+    engine = env.make(make_capability(env.fake, seen, error_at_start=error, move_in="view"), **GRAB, **DEMO)
+    result = env.run(engine).result
+    assert result.status == Result.STATUS_FAILED and result.error_code == "not_allowed"
+    assert result.recoverable is True
+    assert len(goals(env)) == 0
+
+
+def test_the_pre_task_beat_plays_just_before_the_first_move(env):
+    seen = {}
+    engine = env.make(make_capability(env.fake, seen, phases=("view",), move_in="view"), **GRAB, **DEMO)
+    assert env.run(engine).result.status == Result.STATUS_SUCCESS
+    assert seen["at_start"] == 0 and seen["before_move"] == 0  # nothing before the task, nothing yet at the move
+    assert seen["after_move"] >= 1  # the eager beat went out ahead of the move
+
+
+def test_a_failure_beat_plays_then_the_same_error(env):
+    seen = {}
+    error = EngineError("lost_it", "dropped", recoverable=True)
+    engine = env.make(
+        make_capability(env.fake, seen, phases=("view",), move_in="view", fail_in="view", error=error), **GRAB, **DEMO
+    )
+    result = env.run(engine).result
+    assert result.status == Result.STATUS_FAILED and result.error_code == "lost_it" and result.recoverable is True
+    assert len(goals(env)) > seen["at_raise"]  # the sorry beat
+
+
+def test_an_unknown_phase_plays_no_beat_in_it(env):
+    seen = {}
+    error = EngineError("lost_it", "dropped", recoverable=True)
+    engine = env.make(
+        make_capability(env.fake, seen, phases=("renamed",), fail_in="renamed", error=error), **GRAB, **DEMO
+    )
+    result = env.run(engine).result
+    assert result.error_code == "lost_it"
+    assert len(goals(env)) == seen["at_raise"] == 0
+
+
+@pytest.mark.parametrize("error, status", [(Cancelled(), Result.STATUS_CANCELLED), (EStopped("e-stop"), Result.STATUS_FAILED)])
+def test_cancel_or_estop_during_the_task_is_the_tasks_own_outcome_with_no_beats_after(env, error, status):
+    seen = {}
+    engine = env.make(make_capability(env.fake, seen, fail_in="press", error=error), **on())
+    result = env.run(engine).result
+    assert result.status == status
+    assert len(goals(env)) == 0
+    assert type(engine.arm).__name__ != "PuppyArm"
+
+
+@pytest.mark.parametrize("raised", [Cancelled, lambda: EStopped("e-stop"), lambda: ControlTaken("taken")])
+def test_a_cancel_estop_or_takeover_during_the_proud_leaves_the_success(env, monkeypatch, raised):
+    from puppy_mode_ros.player import Player
+
+    real = Player._play_beat
+
+    def play(self, beat):
+        if beat.name == "proud":
+            raise raised()
+        return real(self, beat)
+
+    monkeypatch.setattr(Player, "_play_beat", play)
+    seen = {}
+    engine = env.make(make_capability(env.fake, seen), **on())
+    result = env.run(engine).result
+    assert result.status == Result.STATUS_SUCCESS
+    assert json.loads(result.payload_json) == {"done": "run"}
+    assert type(engine.arm).__name__ != "PuppyArm"
+
+
+@pytest.mark.parametrize("raised", [Cancelled, lambda: EStopped("e-stop"), lambda: ControlTaken("taken")])
+def test_a_cancel_estop_or_takeover_during_the_sorry_reraises_the_original_error(env, monkeypatch, raised):
+    from puppy_mode_ros.player import Player
+
+    real = Player._play_beat
+
+    def play(self, beat):
+        if beat.name == "sorry":
+            raise raised()
+        return real(self, beat)
+
+    monkeypatch.setattr(Player, "_play_beat", play)
+    seen = {}
+    error = EngineError("lost_it", "dropped", recoverable=True)
+    engine = env.make(
+        make_capability(env.fake, seen, phases=("view",), move_in="view", fail_in="view", error=error), **GRAB, **DEMO
+    )
+    result = env.run(engine).result
+    assert result.status == Result.STATUS_FAILED and result.error_code == "lost_it" and result.recoverable is True
