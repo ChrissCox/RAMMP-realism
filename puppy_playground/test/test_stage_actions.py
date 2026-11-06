@@ -374,7 +374,8 @@ def test_stage_refuses_from_elsewhere_than_the_approved_start(env, urdf_text, st
 
 def test_plan_stage_from_a_start_in_collision_refuses_bad_start_and_writes_nothing(env, monkeypatch):
     monkeypatch.setattr(
-        env.engine, "_obstacle_clearances", lambda chain, q, margin: np.array([-0.01, 0.2, 0.2, 0.2])
+        PuppyPlayground, "_obstacle_clearances",
+        classmethod(lambda cls, chain, q, margin: np.array([-0.01, 0.2, 0.2, 0.2])),
     )
     env.at(HOME)
     res = env.run("plan_stage")
