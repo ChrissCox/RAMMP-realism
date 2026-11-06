@@ -13,7 +13,7 @@ dependencies = ["numpy>=1.24", "pyyaml>=5.4"]
 packages = ["puppy_motion"]
 
 [tool.setuptools.package-data]
-puppy_motion = ["data/*.yaml"]
+puppy_motion = ["data/*.yaml", "data/flatbot_layers/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

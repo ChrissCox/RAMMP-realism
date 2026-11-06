@@ -1,0 +1,4 @@
+rammp-org/rammp-deployments, branch feature/flatbot-empty-world
+commit ec39dd2764d9c1eeabd1633e949c5b5fbb5b9a98
+path december_2026/config/robots/flatbot/curobo/
+files layer_mebot_person.yaml layer_mebot_seat.yaml layer_mebot_platform.yaml (byte-for-byte)
