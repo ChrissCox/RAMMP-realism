@@ -31,22 +31,24 @@ RUN pip install --no-cache-dir /tmp/puppy_motion && rm -rf /tmp/puppy_motion
 
 COPY puppy_playground/ src/puppy_playground/
 
-RUN . /opt/ros/humble/setup.sh \
-    && . /ros2_ws/install/setup.sh \
-    && apt-get update \
-    && rosdep update --rosdistro humble \
-    && rosdep install --from-paths src --ignore-src -y \
-    && rm -rf /var/lib/apt/lists/* \
-    && colcon build \
-    && rm -rf build log
+# rosdep installs capability_engine's apt dependencies (kortex_description, robotiq_description, scipy)
+# and puppy_playground's; those are not known to be in the base, so this is the same step the
+# example/grab_container Dockerfiles run. Nothing here is a pip dependency: pybullet and puppy_motion
+# (with its numpy/scipy/pyyaml requirements) are installed explicitly above.
+RUN . /opt/ros/humble/setup.sh     && . /ros2_ws/install/setup.sh     && apt-get update     && rosdep update --rosdistro humble     && rosdep install --from-paths src --ignore-src -y     && rm -rf /var/lib/apt/lists/*     && colcon build     && rm -rf build log
+
+# The entrypoint sources /opt/ros/humble, the base's /ros2_ws overlay and this /module_ws overlay,
+# then execs the command (so `docker run IMAGE python3 ...` works too).
+COPY puppy_playground/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 # /data holds stage_path.json, stage_path.candidate.json and playground.jsonl (mount a host dir).
 VOLUME /data
 EXPOSE 8080
 
-# Standalone, no orchestrator. Add `mock:=true` (docker run ... puppy-playground ros2 launch
-# puppy_playground playground.launch.py mock:=true) for a dry run.
 # `ros2 launch` on Humble has no SIGTERM handler; SIGINT stops its nodes cleanly.
 STOPSIGNAL SIGINT
-ENTRYPOINT ["ros2", "launch", "puppy_playground", "playground.launch.py", "use_orchestrator:=false"]
-CMD ["mock:=false"]
+ENTRYPOINT ["/entrypoint.sh"]
+# Launch arguments go after the launch file: docker run ... IMAGE ros2 launch puppy_playground
+# playground.launch.py mock:=true   (BRINGUP.md has the exact commands)
+CMD ["ros2", "launch", "puppy_playground", "playground.launch.py", "use_orchestrator:=false"]
