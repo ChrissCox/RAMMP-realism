@@ -24,4 +24,4 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: pytest puppy_playground
-        run: docker run --rm -v "$PWD":/repo puppy-ros-test:ci pytest puppy_playground/test -q
+        run: docker run --rm -v "$PWD":/repo puppy-ros-test:ci python3 -m pytest puppy_playground/test -q
