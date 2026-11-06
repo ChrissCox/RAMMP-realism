@@ -1,8 +1,8 @@
 # x86 ROS 2 Humble test image for puppy_playground.
 # Base: rammp-org/rammp-kitchen-capability-engines docker/test.Dockerfile at c3989c6, copied
 # verbatim below (lines up to the PYTHONPATH block). Added at the end: capability_engine from that
-# same commit (+ its test helper fake_driver.py) and puppy_motion from this repo, copied in at
-# build time, so the build context is the repo root:
+# same commit (+ its test helper fake_driver.py). puppy_motion is NOT in the image: the workflow
+# pip-installs it from the mounted repo, so library changes keep the cache.
 #   docker build -f docker/ros-test.Dockerfile -t puppy-ros-test .
 #   docker run --rm -v "$PWD":/repo puppy-ros-test pytest puppy_playground/test -q
 # puppy_playground itself is not installed: the mounted /repo/puppy_playground is on PYTHONPATH.
