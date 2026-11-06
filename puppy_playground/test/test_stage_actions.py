@@ -341,24 +341,25 @@ def test_a_changed_approved_file_is_rechecked_after_a_cached_ok(env, urdf_text, 
     assert not env.fake.goals["execute_joint_trajectory"]
 
 
-# Kinova Home is [0, 15, 180, 230, 0, 55, 90] deg; the pose the arm is actually parked at, near it, in the
-# engine's convention (limited joint 4 as -126.5, continuous joint 3 wrapped to (-pi, pi])
-KINOVA_HOME = np.deg2rad([11.7, -7.9, -176.2, -126.5, -17.0, 55.0, 90.0])
+# The pose the arm is actually parked at, near Kinova Home ([0, 15, 180, 230, 0, 55, 90] deg; exact Kinova
+# Home has no passing local plan), in the engine's convention (joint 4 limited, joint 3 wrapped to (-pi, pi])
+PARKED = np.deg2rad([11.7, -7.9, -176.2, -126.5, -17.0, 55.0, 90.0])
 
 
-def test_plan_stage_plans_from_a_kinova_home_like_start_and_stage_replays_it(env, urdf_text, stage_q):
+def test_plan_stage_plans_from_the_users_park_and_stage_replays_it(env, urdf_text, stage_q):
     from puppy_motion.escape import grown_scene
     from puppy_motion.stage import path_violations
 
-    env.at(KINOVA_HOME)
+    env.at(PARKED)
     res = env.run("plan_stage")
     assert res.status == Result.STATUS_SUCCESS, (res.error_code, res.payload_json)
     chain = Chain.from_urdf(urdf_text)
     cand = stage_store.load(env.cand_file, urdf_text, stage_q, chain)
-    assert np.allclose(cand.points[0][1], KINOVA_HOME, atol=1e-6) and np.allclose(cand.q_rest, KINOVA_HOME, atol=1e-6)
+    assert json.loads(env.cand_file.read_text())["method"] == "via"
+    assert np.allclose(cand.points[0][1], PARKED, atol=1e-6) and np.allclose(cand.q_rest, PARKED, atol=1e-6)
     assert not path_violations(cand.points, chain, grown_scene(chair_scene(), stage_store.MARGIN_M))
     env.cand_file.replace(env.stage_file)  # approve
-    env.at(KINOVA_HOME)
+    env.at(PARKED)
     res = env.run("stage")
     assert res.status == Result.STATUS_SUCCESS, (res.error_code, res.payload_json)
     assert env.fake.goals["execute_joint_trajectory"]
@@ -407,7 +408,8 @@ def test_the_obstacle_floor_is_anchored_like_the_person_floor(env, urdf_text, st
 
     monkeypatch.setattr(env.engine, "_path_violations", spy)
     c_stored = env.engine._obstacle_clearances(chain, path_points[0][1], stage_store.MARGIN_M)
-    for off in (0.005, 0.01, 0.015):  # the reviewer's case: a j1 offset from the stored start
+    seen_closer = False
+    for off in (0.005, 0.01, 0.015, -0.005, -0.01):  # a j1 offset from the stored start, farther and closer
         refs.clear()
         reading = HOME.copy()
         reading[0] += off
@@ -416,10 +418,12 @@ def test_the_obstacle_floor_is_anchored_like_the_person_floor(env, urdf_text, st
         assert res.status == Result.STATUS_SUCCESS, (off, res.error_code, res.payload_json)
         c_reading = env.engine._obstacle_clearances(chain, reading, stage_store.MARGIN_M)
         assert np.allclose(refs[0], np.minimum(c_reading, c_stored), atol=1e-9)
+        seen_closer = seen_closer or bool(np.any(c_reading < c_stored - 1e-6))
         env.fake.goals["execute_joint_trajectory"].clear()
         env.at(stage_q)
         assert env.run("rest").status == Result.STATUS_SUCCESS
         env.fake.goals["execute_joint_trajectory"].clear()
+    assert seen_closer  # a reading closer to an obstacle than the stored start was covered
 
 
 def test_plan_stage_with_no_passing_plan_deletes_a_stale_candidate_and_fails_saying_what_was_tried(env, monkeypatch):
@@ -740,3 +744,33 @@ def test_the_person_floor_is_the_worse_of_the_reading_and_the_stored_start(
     assert np.allclose(refs[0], np.minimum(c_reading, c_stored), atol=1e-9)
     if sign < 0:  # a reading closer to the person than the stored start still uses the reading as the floor
         assert np.any(c_reading < c_stored - 1e-6) and np.allclose(refs[0][c_reading < c_stored], c_reading[c_reading < c_stored])
+
+
+START_BAD = {  # starts too close to the occupant or an obstacle, found by random search (degrees)
+    "far_inside_the_occupant": ([22.9, 114.2, -43.4, -71.2, -15.7, 36.2, -143.6], "chair occupant"),
+    "upper_arm_deep_in_the_occupant": ([-115.7, -26.6, -177.9, -68.4, -28.4, -90.6, 47.9], "chair occupant"),
+    "near_an_obstacle": ([174.1, -127.6, -48.3, -127.2, 50.4, -104.3, -155.4], "obstacle"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(START_BAD))
+def test_a_start_too_close_to_the_occupant_or_an_obstacle_is_refused_with_the_part_named(env, name):
+    deg, what = START_BAD[name]
+    env.at(np.deg2rad(deg))
+    res = env.run("plan_stage")
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "bad_start"), (res.error_code, res.payload_json)
+    msg = json.loads(res.payload_json)["message"]
+    assert what in msg and any(p in msg for p in ("upper_arm", "forearm", "wrist", "head"))
+    assert not env.cand_file.exists()
+
+
+def test_the_start_gate_passes_rest_the_old_window_corners_the_park_and_kinova_home(urdf_text):
+    import itertools
+
+    chain = Chain.from_urdf(urdf_text)
+    starts = [HOME, PARKED, np.deg2rad([0.0, 15.0, 180.0, -130.0, 0.0, 55.0, 90.0])]
+    starts += [HOME + 0.02 * np.array(c) for c in itertools.product([-1.0, 1.0], repeat=7)]
+    for q in starts:
+        assert PuppyPlayground._bad_start(chain, q) is None, np.rad2deg(q)
+    for deg, _ in START_BAD.values():
+        assert PuppyPlayground._bad_start(chain, np.deg2rad(deg)) is not None

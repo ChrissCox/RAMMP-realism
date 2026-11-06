@@ -6,7 +6,7 @@ the APPROVED file only (the operator copies the candidate over it), after the fi
 rules again (cached per engine start by file hash, chair-scene commit and URDF hash). rest replays
 the stored forward path backwards: the same samples in reverse order with velocities re-derived, so
 it visits exactly the postures the forward path was checked on. The forward-direction floor rules
-do not apply to the reversed order (it ends at rest, inside the torso box), so the forward check
+do not apply to the reversed order (the arm starts wherever it was parked), so the forward check
 gates it, plus the cap and ends rules on the reversed points themselves."""
 
 import json
@@ -23,7 +23,7 @@ from capability_engine.sim import SimModelError
 from puppy_motion import stage as stage_rules
 from puppy_motion.escape import escape_path, grown_scene
 from puppy_motion.flatbot import CHAIR_LAYERS_COMMIT, chair_scene
-from puppy_motion.geometry import clearances_batch
+from puppy_motion.geometry import PARTS, clearances_batch
 from puppy_motion.joints import align_turns, shortest_delta
 from puppy_motion.track import DT, Zone
 from puppy_motion.urdf import Chain
@@ -34,6 +34,10 @@ from . import motion, pipeline, stage_store
 STILL_RAD_S = 0.02  # every |dq| must be below this to start a move
 AT_TOL_RAD = 0.02  # "at" a path sample
 MOVED_RAD = 1e-3  # recover: the reading may change this little between the check and the send
+# plan_stage start gate, on the MARGIN_M-grown scene (every stage-path floor is relative to the first
+# sample, so a start that is already deep in a box would make them meaningless)
+START_PERSON_MIN_M = {"upper_arm": -0.010, "forearm": 0.010, "wrist": 0.010, "head": 0.010}
+START_OBSTACLE_MIN_M = 0.010
 RECOVER_STAGE_RAD = 0.10  # recover: this close to the stage pose, min-jerk to it
 STAGE_PATH = "/data/stage_path.json"
 CANDIDATE_PATH = "/data/stage_path.candidate.json"
@@ -171,8 +175,9 @@ class PuppyPlayground(CapabilityEngine):
 
     @classmethod
     def _bad_start(cls, chain, q):
-        """Why q cannot be a plan_stage start (None when it can): outside the URDF limits or the
-        joint guards, or closer to an obstacle than the path rules allow."""
+        """Why q cannot be a plan_stage start (None when it can): outside the URDF limits or the joint
+        guards, or too close to the occupant boxes or an obstacle (START_PERSON_MIN_M,
+        START_OBSTACLE_MIN_M, on the grown scene)."""
         lo, hi = chain.pos_limits[:, 0], chain.pos_limits[:, 1]
         if np.any(q < lo) or np.any(q > hi):
             j = int(np.argmax(np.maximum(lo - q, q - hi)))
@@ -180,11 +185,14 @@ class PuppyPlayground(CapabilityEngine):
         over = np.abs(q) - stage_rules.guard_limits(chain)
         if np.any(over > 1e-9):
             return f"joint {int(np.argmax(over)) + 1} is past its guard"
-        obstacle = cls._obstacle_clearances(chain, q, stage_store.MARGIN_M)
-        if not np.all(np.isfinite(obstacle)):
-            return "the obstacle clearance is not finite"
-        if np.any(obstacle < 0.0):  # touching or inside an obstacle (the rest pose itself is ~2 cm off)
-            return f"the arm is in collision with an obstacle ({float(obstacle.min()):.3f} m)"
+        person, obstacle = cls._clearances(chain, q, stage_store.MARGIN_M)
+        if not (np.all(np.isfinite(person)) and np.all(np.isfinite(obstacle))):
+            return "the clearance is not finite"
+        for i, part in enumerate(PARTS):
+            if person[i] < START_PERSON_MIN_M[part]:
+                return f"the {part} is {person[i] * 1000:.0f} mm from the chair occupant (needs {START_PERSON_MIN_M[part] * 1000:.0f} mm)"
+            if obstacle[i] < START_OBSTACLE_MIN_M:
+                return f"the {part} is {obstacle[i] * 1000:.0f} mm from an obstacle (needs {START_OBSTACLE_MIN_M * 1000:.0f} mm)"
         return None
 
     def _load(self, path, urdf_text, chain, stage_q):
@@ -329,7 +337,7 @@ class PuppyPlayground(CapabilityEngine):
         for method in ("curobo", "min_jerk", "escape", "via"):
             ctx.checkpoint()
             try:
-                points = self._candidate_points(method, chain, q, target, rec)
+                points = self._candidate_points(method, chain, q, target, rec, ctx)
             except ValueError as e:
                 tried[method] = [f"{type(e).__name__}: {e}"]
                 continue
@@ -363,7 +371,7 @@ class PuppyPlayground(CapabilityEngine):
         rec["result"] = out
         return out
 
-    def _candidate_points(self, method, chain, q, target, rec):
+    def _candidate_points(self, method, chain, q, target, rec, ctx=None):
         """One planner's retimed points from q to target (None when it has no plan)."""
         if method == "curobo":
             plan = self.arm.plan_to_joints(target, q)  # nothing moves
@@ -378,23 +386,25 @@ class PuppyPlayground(CapabilityEngine):
             seconds = max(2.0, float(np.abs(target - q).max()) / 0.2)
             return stage_rules.retime_path(stage_rules.min_jerk_path(q, target, seconds), chain)
         if method == "via":
-            return self._via_points(chain, q, target)
+            return self._via_points(chain, q, target, ctx)
         return escape_path(chain, chair_scene(), q, target)
 
     VIA_TRIES = 600
 
     @staticmethod
-    def _via_points(chain, q, target):
+    def _via_points(chain, q, target, ctx=None):
         """Two straight joint-space legs q -> w -> target through a seeded random waypoint w, for starts
         (a parked arm) where neither the straight line nor escape_path passes. A waypoint is kept only
         if both legs, sampled finely, keep the person floor, the 0.35 m rule and the obstacle floor
-        against the scene grown by MARGIN_M; the full path rules are checked by the caller. Returns
-        None when no waypoint is found."""
+        against the scene grown by MARGIN_M; the full path rules are checked by the caller. Checks
+        `ctx` (Stop / Cancel) every few tries. Returns None when no waypoint is found."""
         scene = grown_scene(chair_scene(), stage_store.MARGIN_M)
         lim = stage_rules.guard_limits(chain)
         far = stage_rules._FAR_PARTS
         rng = np.random.default_rng(0)
-        for _ in range(PuppyPlayground.VIA_TRIES):
+        for i in range(PuppyPlayground.VIA_TRIES):
+            if ctx is not None and i % 5 == 0:
+                ctx.checkpoint()
             w = q + rng.uniform(0.2, 0.8) * (target - q) + rng.normal(0.0, 0.35, 7) * (rng.random(7) < 0.5)
             qs = np.vstack([q[None, :], np.linspace(q, w, 60)[1:], np.linspace(w, target, 60)[1:]])
             if np.any(np.abs(qs) > lim):

@@ -100,10 +100,15 @@ docker run --rm --network host --ipc host --env-file ~/puppy-env.list -v ~/puppy
     ros2 launch puppy_playground playground.launch.py use_orchestrator:=false plan_only:=true
 ```
 
-Attended: hand on the e-stop, nobody in the chair. Park the arm anywhere still and clear (for example
-Kinova Home); the plan starts from wherever it is, and Stage and Rest later use that spot as "rest".
-If Plan stage refuses `bad_start`, the arm is outside a joint limit or too close to an obstacle: move
-it by hand and try again. Open `http://<snorlax>:8080/` and
+Attended: hand on the e-stop, nobody in the chair. Park the arm still and clear, ideally at the tested
+park [11.7, -7.9, -176.2, -126.5, -17.0, 55.0, 90.0] deg (in Kinova's 0-360 form: 11.7, 352.1, 183.8,
+233.5, 343.0, 55.0, 90.0). The plan starts from wherever the arm is, and Stage and Rest later use that
+spot as "rest". Do not move the arm between Plan stage and Stage: if Stage says `not_at_start`, plan
+again. From the park, expect about 47 s each way. Exact Kinova Home ([0, 15, 180, 230, 0, 55, 90] deg)
+may give `no_candidate` unless the real cuRobo planner finds a path. On `no_candidate` or `bad_start`
+the page shows the reason (`bad_start` names the part: within 10 mm of the chair occupant's boxes, or
+of an obstacle, or outside a joint limit); then, attended, move the arm a little further from the chair
+(for example toward the tested park) and press Plan stage again. Open `http://<snorlax>:8080/` and
 press **only "Plan stage (no motion)"**, the button set apart from the motion buttons. Press nothing
 else: with `plan_only` the engine refuses every other action, but do not rely on that. The line beside
 the button says "candidate written" or shows why none was (`no_candidate` and its message). (Or, on
