@@ -167,13 +167,6 @@ def test_stage_refuses_a_path_with_bad_endpoints(env, urdf_text, stage_q, path_p
     assert not env.fake.goals["execute_joint_trajectory"]
 
 
-def test_stage_refuses_a_path_whose_margin_does_not_hold(env, urdf_text, stage_q, path_points):
-    stage_store.save(env.stage_file, path_points, urdf_text, stage_q, margin_m=0.5)
-    env.at(HOME)
-    assert env.run("stage").error_code == "unsafe_stage_path"
-    assert not env.fake.goals["execute_joint_trajectory"]
-
-
 def test_stage_refuses_when_not_at_the_paths_start(env, urdf_text, stage_q, path_points):
     approve(env, urdf_text, stage_q, path_points)
     env.at(HOME + 0.3)

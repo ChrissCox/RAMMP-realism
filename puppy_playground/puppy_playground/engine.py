@@ -245,7 +245,9 @@ class PuppyPlayground(CapabilityEngine):
         if np.abs(q - stage_q).max() <= RECOVER_STAGE_RAD:
             seconds = max(1.0, float(np.abs(stage_q - q).max()) / 0.2)
             pts = stage_rules.retime_path(stage_rules.min_jerk_path(q, stage_q, seconds), chain)
-            bad = check_beat(pts, q, chain, chair_scene(), Zone.FREE, held=self._held())
+            # check_beat expects a beat that returns to q_start; this move ends at the stage pose,
+            # so only that one rule ("end") is waived, every other rule applies
+            bad = [v for v in check_beat(pts, q, chain, chair_scene(), Zone.FREE, held=self._held()) if v.rule != "end"]
             rec["checks"] = [f"{v.rule}: {v.detail}" for v in bad]
             if bad:
                 raise EngineError("unsafe_move", f"{bad[0].rule}: {bad[0].detail}")

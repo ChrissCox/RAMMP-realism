@@ -66,3 +66,12 @@ def test_the_shipped_stage_pose_has_a_checked_escape_path_with_the_candidate_mar
     p = escape_path(chain, chair_scene(), home, q)
     assert path_violations(p, chain, grown_scene(chair_scene(), 0.002)) == []
     assert np.abs(p[-1][1] - q).max() < 1e-6 and "search_index" in doc
+
+
+def test_grown_scene_never_reads_more_clearance_than_the_margin_allows(chain, path):
+    from puppy_motion.escape import grown_scene
+
+    scene, grown = chair_scene(), grown_scene(chair_scene(), 0.002)
+    for _, q, _ in path[::200]:
+        a, b = clearances(chain, scene, q, False), clearances(chain, grown, q, False)
+        assert np.all(b <= a - 0.002 + 1e-6)
