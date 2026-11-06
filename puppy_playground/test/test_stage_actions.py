@@ -259,7 +259,7 @@ def turn_shift_is_whole_and_uniform(sent, stored):
 def test_stage_works_from_a_wrapped_rest_reading_and_sends_the_path_on_that_turn(env, urdf_text, stage_q, path_points):
     approve(env, urdf_text, stage_q, path_points)
     reading = HOME.copy()
-    reading[2] = 3.141  # the driver's wrapped reading of j3 = -3.137 (a turn away from the stored value)
+    reading[2] = 3.151  # the driver's wrapped reading of j3 = -3.137 + 0.005 (a turn away from the stored value)
     env.at(reading)
     res = env.run("stage")
     assert res.status == Result.STATUS_SUCCESS, res.error_code
@@ -560,7 +560,7 @@ def test_stage_from_a_reading_off_rest_starts_at_the_reading_and_ends_at_the_sto
 ):
     approve(env, urdf_text, stage_q, path_points)
     reading = HOME.copy()
-    reading[1] += 0.015  # j2 sags 0.015 rad off the stored rest
+    reading[1] -= 0.015  # j2 sags 0.015 rad off the stored rest (the person-floor rule is one-sided: see the next test)
     env.at(reading)
     res = env.run("stage")
     assert res.status == Result.STATUS_SUCCESS, res.error_code
@@ -597,7 +597,7 @@ def test_a_blended_path_that_breaks_a_rule_is_refused_and_nothing_is_sent(
     from types import SimpleNamespace
 
     approve(env, urdf_text, stage_q, path_points)
-    start = HOME if action == "stage" else stage_q
+    start = path_points[0][1] if action == "stage" else path_points[-1][1]
     reading = start.copy()
     reading[1] += 0.015
     real_full, real_caps = env.engine._path_violations, env.engine._caps_ends
@@ -628,4 +628,18 @@ def test_stage_and_rest_refuse_moved_when_the_arm_moves_during_the_checks(
     monkeypatch.setattr(env.engine, "_still_q", lambda: next(reads))
     res = env.run(action)
     assert (res.status, res.error_code) == (Result.STATUS_FAILED, "moved")
+    assert not env.fake.goals["execute_joint_trajectory"]
+
+
+def test_stage_refuses_a_reading_whose_blend_would_dip_back_toward_the_person(env, urdf_text, stage_q, path_points):
+    """The person-floor rule is measured from the first sample sent. A reading that sits farther from the
+    person than the stored rest (j2 + 0.015 rad here) makes the blend sink back to the stored clearance,
+    which the rule refuses: nothing is sent and the operator sees why."""
+    approve(env, urdf_text, stage_q, path_points)
+    reading = HOME.copy()
+    reading[1] += 0.015
+    env.at(reading)
+    res = env.run("stage")
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "unsafe_move")
+    assert "path_person_floor" in json.loads(res.payload_json)["message"]
     assert not env.fake.goals["execute_joint_trajectory"]
