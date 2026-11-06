@@ -74,6 +74,10 @@ class Supervisor:
             return self._enter(State.OFF)
         if self.state is not State.OFF:
             return []
+        if self._estop:
+            # turning auto on while e-stopped is refused: it stays OFF, and nothing starts on release
+            self.off_reason = "estopped"
+            return []
         self.off_reason = None
         return self._enter(self._waiting_state(self._clock()))
 
@@ -103,13 +107,24 @@ class Supervisor:
             return self._enter(self._waiting_state(self._clock()))
         return []
 
-    def goal_done(self, code=None):
+    def retry_later(self):
+        """A send was due but the previous (cancelled) goal has not reported yet: wait and try again.
+        Never turns auto off."""
+        self._quiet_since = self._clock()
+        if self.state is State.PLAYING:
+            self.state = State.WAITING_IDLE
+        return []
+
+    def goal_done(self, code=None, cancelled=False):
         """The auto goal ended. If the supervisor did not cancel it (state still PLAYING) it ended by
         itself, whether by failure or success: auto turns OFF with the error code (or "ended") and
         never sends again until the user toggles it on. A goal the supervisor cancelled (a task
-        started, an e-stop, toggle off) is not PLAYING any more, so it is ignored here."""
+        started, an e-stop, toggle off) is not PLAYING any more, so it is ignored here. A CANCELLED
+        result (cancelled=True) is never "ended by itself": it never turns auto off."""
         self._quiet_since = self._clock()
-        if self.state is State.PLAYING:
+        if self.state is State.PLAYING and cancelled:
+            self.state = State.WAITING_IDLE
+        elif self.state is State.PLAYING:
             self.off_reason = code or "ended"
             self.state = State.OFF
         return []

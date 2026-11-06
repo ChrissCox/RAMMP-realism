@@ -125,3 +125,16 @@ def test_min_jerk_path_is_on_the_clock(poses):
     pts = min_jerk_path(REST_Q, poses[0], 2.0)
     assert len(pts) == 101 and abs(pts[1][0] - DT) < 1e-12
     assert not pts[0][2].any() and not pts[-1][2].any()
+
+
+def test_person_floor_ref_replaces_the_first_samples_clearances(chain, slow0):
+    from puppy_motion.geometry import clearances_batch
+
+    scene = chair_scene()
+    first = clearances_batch(chain, scene, np.asarray(slow0[0][1], dtype=float)[None, :], False)[0, 0, :]
+    default = rules(path_violations(slow0, chain, scene))
+    assert rules(path_violations(slow0, chain, scene, person_floor_ref=first)) == default  # None == the first sample
+    low = rules(path_violations(slow0, chain, scene, person_floor_ref=first - 5.0))
+    assert "path_person_floor" not in low
+    high = path_violations(slow0, chain, scene, person_floor_ref=first + 5.0)
+    assert "path_person_floor" in rules(high)

@@ -86,7 +86,7 @@ def _play(arm, ctx, chain, scene, beat_builder, held, rec, anchors):
     if anchors is not None and not _anchored(chain, q, anchors):
         raise EngineError(
             "drifted",
-            "the arm has drifted from the stage pose; press Stage (or Rest) to re-seat it",
+            "the arm has drifted from the stage pose; press Recover to re-seat it",
         )
     gap = float(np.abs(shortest_delta(chain, q, points[0][1])).max())
     if not (gap <= SHIFT_TOL_RAD):

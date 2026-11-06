@@ -232,12 +232,17 @@ def test_estop_cleared_while_a_task_runs_stays_off():
     assert r.sup.state is State.OFF
 
 
-def test_toggle_on_while_estopped_stays_estopped():
+def test_toggle_on_while_estopped_is_refused_and_nothing_starts_on_release():
     r = Rig(on=False, estop=True)
-    r.sup.toggle(True)
-    assert r.sup.state is State.ESTOPPED
+    assert r.sup.toggle(True) == []
+    assert r.sup.state is State.OFF and r.sup.off_reason == "estopped"
     r.still_s = 99
     assert sends(r.step(10)) == []
+    r.sup.estopped(False)
+    assert r.sup.state is State.OFF
+    assert sends(r.step(60)) == []
+    r.sup.toggle(True)  # a press after the release turns it on
+    assert r.sup.off_reason is None and sends(r.step(10))
 
 
 def test_estop_while_off_stays_off():
@@ -317,4 +322,20 @@ def test_a_goal_the_supervisor_cancelled_for_a_task_is_ignored_and_auto_resumes_
     assert r.sup.state is State.WAITING_FOR_TASK and r.sup.off_reason is None
     r.idle.add("rammp_task")
     r.sup.engine_status("rammp_task", "idle")
+    assert sends(r.step(10))
+
+
+def test_a_cancelled_result_never_turns_auto_off():
+    r = Rig()
+    r.play()
+    assert r.sup.goal_done("", cancelled=True) == []
+    assert r.sup.state is State.WAITING_IDLE and r.sup.off_reason is None
+    assert sends(r.step(10))
+
+
+def test_retry_later_waits_and_resends_without_turning_auto_off():
+    r = Rig()
+    r.play()
+    assert r.sup.retry_later() == []
+    assert r.sup.state is State.WAITING_IDLE and r.sup.off_reason is None
     assert sends(r.step(10))

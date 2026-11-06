@@ -23,6 +23,7 @@ from capability_engine.sim import SimModelError
 from puppy_motion import stage as stage_rules
 from puppy_motion.escape import escape_path, grown_scene
 from puppy_motion.flatbot import CHAIR_LAYERS_COMMIT, chair_scene
+from puppy_motion.geometry import clearances_batch
 from puppy_motion.joints import align_turns, shortest_delta
 from puppy_motion.stage import REST_Q
 from puppy_motion.track import DT, Zone
@@ -145,9 +146,18 @@ class PuppyPlayground(CapabilityEngine):
             return True
         return not np.isfinite(pos) or 0.05 < pos < 0.93
 
-    def _path_violations(self, points, chain, margin):
-        """The stage-path rules on `points` against the chair scene grown by `margin` metres."""
-        return stage_rules.path_violations(points, chain, grown_scene(chair_scene(), margin))
+    def _path_violations(self, points, chain, margin, person_floor_ref=None):
+        """The stage-path rules on `points` against the chair scene grown by `margin` metres.
+        `person_floor_ref`: see puppy_motion.stage.path_violations (default: the first sample)."""
+        return stage_rules.path_violations(
+            points, chain, grown_scene(chair_scene(), margin), person_floor_ref=person_floor_ref
+        )
+
+    @staticmethod
+    def _person_clearances(chain, q, margin):
+        """The four per-part person clearances at q (against the scene grown by `margin`)."""
+        scene = grown_scene(chair_scene(), margin)
+        return clearances_batch(chain, scene, np.asarray(q, dtype=float)[None, :], False)[0, 0, :]
 
     def _load(self, path, urdf_text, chain, stage_q):
         """The StagePath in `path`, re-checked once per engine start (cached by file hash)."""
@@ -198,7 +208,14 @@ class PuppyPlayground(CapabilityEngine):
         `moved` if the arm has since moved. Returns the points to send."""
         blended = align_turns(chain, q, self._blend(chain, points, q))
         if full_rules:
-            bad = self._path_violations(blended, chain, stage_store.MARGIN_M)
+            # the person floor is anchored at the WORSE of where the arm is and where the approved
+            # path starts: the blend may come no closer to the person than either
+            ref = np.minimum(
+                self._person_clearances(chain, q, stage_store.MARGIN_M),
+                self._person_clearances(chain, points[0][1], stage_store.MARGIN_M),
+            )
+            rec["person_floor_ref"] = [float(x) for x in ref]
+            bad = self._path_violations(blended, chain, stage_store.MARGIN_M, person_floor_ref=ref)
         else:
             bad = self._caps_ends(blended, chain)
         rec["checks"] = [f"{v.rule}: {v.detail}" for v in bad]

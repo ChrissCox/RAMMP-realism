@@ -259,7 +259,7 @@ def turn_shift_is_whole_and_uniform(sent, stored):
 def test_stage_works_from_a_wrapped_rest_reading_and_sends_the_path_on_that_turn(env, urdf_text, stage_q, path_points):
     approve(env, urdf_text, stage_q, path_points)
     reading = HOME.copy()
-    reading[2] = 3.151  # the driver's wrapped reading of j3 = -3.137 + 0.005 (a turn away from the stored value)
+    reading[2] = 3.141  # the driver's wrapped reading of j3 = -3.137 (a turn away from the stored value)
     env.at(reading)
     res = env.run("stage")
     assert res.status == Result.STATUS_SUCCESS, res.error_code
@@ -560,7 +560,7 @@ def test_stage_from_a_reading_off_rest_starts_at_the_reading_and_ends_at_the_sto
 ):
     approve(env, urdf_text, stage_q, path_points)
     reading = HOME.copy()
-    reading[1] -= 0.015  # j2 sags 0.015 rad off the stored rest (the person-floor rule is one-sided: see the next test)
+    reading[1] += 0.015  # j2 sags 0.015 rad off the stored rest
     env.at(reading)
     res = env.run("stage")
     assert res.status == Result.STATUS_SUCCESS, res.error_code
@@ -569,7 +569,7 @@ def test_stage_from_a_reading_off_rest_starts_at_the_reading_and_ends_at_the_sto
     assert np.allclose(qs[0], reading, atol=1e-9)
     assert np.allclose(qs[-1], stored[-1], atol=1e-9)  # the end is exact
     assert len(qs) == len(stored)
-    after = int(round(1.0 / 0.01)) + 1
+    after = int(round(1.0 / 0.02)) + 1
     assert np.allclose(qs[after:], stored[after:], atol=1e-9)  # w == 0 after BLEND_S
     assert rule_failures(urdf_text, qs, True) == []  # the stage rules at MARGIN_M, caps and ends
 
@@ -606,10 +606,16 @@ def test_a_blended_path_that_breaks_a_rule_is_refused_and_nothing_is_sent(
     def off_start(points):
         return float(np.abs(np.asarray(points[0][1]) - start).max()) > 1e-6
 
-    monkeypatch.setattr(
-        env.engine, "_path_violations", lambda pts, chain, margin: bad if off_start(pts) else real_full(pts, chain, margin)
-    )
-    monkeypatch.setattr(env.engine, "_caps_ends", lambda pts, chain: bad if off_start(pts) else real_caps(pts, chain))
+    if action == "stage":  # (rest is checked by _caps_ends only; patching _path_violations would trip _load)
+        monkeypatch.setattr(
+            env.engine,
+            "_path_violations",
+            lambda pts, chain, margin, person_floor_ref=None: bad
+            if off_start(pts)
+            else real_full(pts, chain, margin, person_floor_ref),
+        )
+    else:
+        monkeypatch.setattr(env.engine, "_caps_ends", lambda pts, chain: bad if off_start(pts) else real_caps(pts, chain))
     env.at(reading)
     res = env.run(action)
     assert (res.status, res.error_code) == (Result.STATUS_FAILED, "unsafe_move")
@@ -631,15 +637,29 @@ def test_stage_and_rest_refuse_moved_when_the_arm_moves_during_the_checks(
     assert not env.fake.goals["execute_joint_trajectory"]
 
 
-def test_stage_refuses_a_reading_whose_blend_would_dip_back_toward_the_person(env, urdf_text, stage_q, path_points):
-    """The person-floor rule is measured from the first sample sent. A reading that sits farther from the
-    person than the stored rest (j2 + 0.015 rad here) makes the blend sink back to the stored clearance,
-    which the rule refuses: nothing is sent and the operator sees why."""
+@pytest.mark.parametrize("sign", [1.0, -1.0])
+def test_the_person_floor_is_the_worse_of_the_reading_and_the_stored_start(
+    env, urdf_text, stage_q, path_points, monkeypatch, sign
+):
     approve(env, urdf_text, stage_q, path_points)
+    chain = Chain.from_urdf(urdf_text)
     reading = HOME.copy()
-    reading[1] += 0.015
+    reading[1] += sign * 0.015  # farther from / closer to the person than the stored start
+    refs = []
+    real = env.engine._path_violations
+
+    def spy(pts, chain_, margin, person_floor_ref=None):
+        if person_floor_ref is not None:
+            refs.append(np.array(person_floor_ref))
+        return real(pts, chain_, margin, person_floor_ref)
+
+    monkeypatch.setattr(env.engine, "_path_violations", spy)
     env.at(reading)
     res = env.run("stage")
-    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "unsafe_move")
-    assert "path_person_floor" in json.loads(res.payload_json)["message"]
-    assert not env.fake.goals["execute_joint_trajectory"]
+    assert res.status == Result.STATUS_SUCCESS, (res.error_code, res.payload_json)
+    assert len(refs) == 1
+    c_reading = env.engine._person_clearances(chain, reading, stage_store.MARGIN_M)
+    c_stored = env.engine._person_clearances(chain, path_points[0][1], stage_store.MARGIN_M)
+    assert np.allclose(refs[0], np.minimum(c_reading, c_stored), atol=1e-9)
+    if sign < 0:  # a reading closer to the person than the stored start still uses the reading as the floor
+        assert np.any(c_reading < c_stored - 1e-6) and np.allclose(refs[0][c_reading < c_stored], c_reading[c_reading < c_stored])

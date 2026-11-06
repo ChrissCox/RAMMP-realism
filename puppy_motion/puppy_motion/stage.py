@@ -208,15 +208,17 @@ def _worst(excess, what, names=None):
     return int(i), f"{what} {name}: over by {excess[i, j]:.6g}"
 
 
-def path_violations(points, chain, scene, caps=DEFAULT_CAPS):
-    """Every stage-path rule the path `points` [(t, q, dq), ...] breaks, as Violations."""
+def path_violations(points, chain, scene, caps=DEFAULT_CAPS, person_floor_ref=None):
+    """Every stage-path rule the path `points` [(t, q, dq), ...] breaks, as Violations.
+    `person_floor_ref` (shape (4,), one per part): the person clearances the path may not fall below;
+    default None = the first sample's own clearances."""
     try:
-        return _path_violations(points, chain, scene, caps)
+        return _path_violations(points, chain, scene, caps, person_floor_ref)
     except Exception as e:  # a malformed path must not take the caller down
         return [Violation("path_ends", 0, f"cannot check the path: {type(e).__name__}: {e}")]
 
 
-def _path_violations(points, chain, scene, caps):
+def _path_violations(points, chain, scene, caps, person_floor_ref=None):
     t = np.array([p[0] for p in points], dtype=float)
     q, dq = _arrays(points)
     n = len(t)
@@ -255,7 +257,8 @@ def _path_violations(points, chain, scene, caps):
         out.append(Violation("path_person_floor", int(np.argwhere(np.isnan(c))[0][0]), "NaN clearance"))
         return out
     person, obstacle = c[:, 0, :], c[:, 1, :]
-    add("path_person_floor", _worst(person[0] - FLOOR_TOL - person, "person clearance below its first sample,", PARTS))
+    ref = person[0] if person_floor_ref is None else np.asarray(person_floor_ref, dtype=float)
+    add("path_person_floor", _worst(ref - FLOOR_TOL - person, "person clearance below its first sample,", PARTS))
     far = person[:, _FAR_PARTS]
     reached = np.maximum.accumulate(far >= PERSON_STAGE_M, axis=0)  # each part has reached 0.35 m by here
     far_names = [PARTS[j] for j in _FAR_PARTS]
