@@ -92,7 +92,7 @@ def env(tmp_path):
         pass
 
     e = Env()
-    e.fake, e.run, e.at = fake, run, at
+    e.fake, e.run, e.at, e.engine = fake, run, at, engine
     e.stage_file, e.cand_file, e.dir = stage_file, cand_file, tmp_path
     yield e
     client.destroy()
@@ -341,12 +341,22 @@ def test_a_changed_approved_file_is_rechecked_after_a_cached_ok(env, urdf_text, 
     assert not env.fake.goals["execute_joint_trajectory"]
 
 
-def test_plan_stage_refuses_from_elsewhere_and_leaves_no_stale_candidate(env, stage_q):
-    env.cand_file.write_text("stale")
+def test_plan_stage_refuses_from_elsewhere(env):
     env.at(HOME + 0.3)
     res = env.run("plan_stage")
     assert (res.status, res.error_code) == (Result.STATUS_FAILED, "not_at_rest")
     assert not env.fake.goals["plan_to_joints"]
+
+
+def test_plan_stage_with_no_passing_plan_deletes_a_stale_candidate_and_reports(env, monkeypatch):
+    env.cand_file.write_text("stale")
+    monkeypatch.setattr(env.engine, "_candidate_points", lambda *a, **k: None)  # every planner fails
+    env.at(HOME)
+    res = env.run("plan_stage")
+    assert res.status == Result.STATUS_SUCCESS, res.error_code
+    out = json.loads(res.payload_json)
+    assert out["candidate"] is None and out["method"] is None and out["violations"]
+    assert not env.cand_file.exists()
 
 
 def test_plan_stage_from_a_wrapped_rest_reading_writes_a_candidate(env, urdf_text, stage_q):
@@ -375,3 +385,112 @@ def test_plan_stage_refuses_a_candidate_path_equal_to_the_stage_path(tmp_path):
         engine.destroy_node()
     finally:
         rclpy.shutdown()
+
+
+# ---- margin is fixed, stale measurement, odd readings ---------------------------------------------
+
+
+@pytest.mark.parametrize("margin", [5.0, 1.0, True, "0.002", -0.0, None, 0.0021])
+def test_stage_refuses_any_margin_but_the_fixed_one(env, urdf_text, stage_q, path_points, margin):
+    approve(env, urdf_text, stage_q, path_points)
+    doc = json.loads(env.stage_file.read_text())
+    doc["margin_m"] = margin
+    env.stage_file.write_text(json.dumps(doc))
+    env.at(HOME)
+    res = env.run("stage")
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "bad_stage_path")
+    assert not env.fake.goals["execute_joint_trajectory"]
+
+
+def test_load_requires_a_chain_when_given_a_stage_pose(env, urdf_text, stage_q, path_points):
+    approve(env, urdf_text, stage_q, path_points)
+    with pytest.raises(TypeError):
+        stage_store.load(env.stage_file, urdf_text, stage_q)
+
+
+def test_a_back_and_forth_path_is_refused_at_the_fixed_margin(env, urdf_text, stage_q, path_points):
+    """Out to the all-clear sample, back toward rest, out again: legal at a huge margin (nothing
+    ever reaches 0.35 m on grown boxes) but refused at exactly MARGIN_M."""
+    from puppy_motion.escape import grown_scene
+    from puppy_motion.geometry import clearances_batch
+    from puppy_motion.stage import path_violations, points_from_q, retime_path
+
+    chain = Chain.from_urdf(urdf_text)
+    qs = np.array([q for _, q, _ in path_points])
+    c = clearances_batch(chain, chair_scene(), qs, False)[:, 0, :]
+    k = int(np.argmax((c[:, [1, 2, 3]] >= 0.35).all(axis=1)))
+    j = max(0, k - 200)
+    detour = retime_path(points_from_q(np.vstack([qs, qs[j:][::-1][1:], qs[j:][1:]])), chain)
+    rules = {v.rule for v in path_violations(detour, chain, grown_scene(chair_scene(), stage_store.MARGIN_M))}
+    assert "path_person_monotone" in rules
+    stage_store.save(env.stage_file, detour, urdf_text, stage_q)
+    env.at(HOME)
+    res = env.run("stage")
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "unsafe_stage_path")
+    assert not env.fake.goals["execute_joint_trajectory"]
+
+
+def test_recover_refuses_when_the_reading_changes_between_the_check_and_the_send(
+    env, urdf_text, stage_q, path_points, monkeypatch
+):
+    approve(env, urdf_text, stage_q, path_points)
+    q = stage_q + 0.05
+    env.at(q)
+    reads = iter([q, q + 0.01])
+    monkeypatch.setattr(env.engine, "_still_q", lambda: next(reads))
+    res = env.run("recover")
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "moved")
+    assert not env.fake.goals["execute_joint_trajectory"]
+
+
+@pytest.mark.parametrize("action,at_q", [("stage", "home"), ("rest", "stage")])
+def test_the_checkpoint_comes_after_the_slow_checks_and_before_the_measurement(
+    env, urdf_text, stage_q, path_points, monkeypatch, action, at_q
+):
+    from capability_engine.engine import Context
+
+    approve(env, urdf_text, stage_q, path_points)
+    events = []
+    orig_cp, orig_load, orig_still = Context.checkpoint, env.engine._load, env.engine._still_q
+
+    def cp(self):
+        events.append("checkpoint")
+        return orig_cp(self)
+
+    def load(*a, **k):
+        r = orig_load(*a, **k)
+        events.append("load")
+        return r
+
+    def still():
+        events.append("still_q")
+        return orig_still()
+
+    monkeypatch.setattr(Context, "checkpoint", cp)
+    monkeypatch.setattr(env.engine, "_load", load)
+    monkeypatch.setattr(env.engine, "_still_q", still)
+    env.at(HOME if at_q == "home" else stage_q)
+    assert env.run(action).status == Result.STATUS_SUCCESS
+    i_load, i_still = events.index("load"), events.index("still_q")
+    assert i_load < i_still and "checkpoint" in events[i_load:i_still]
+
+
+def test_a_nan_reading_is_refused_and_nothing_is_sent(env, urdf_text, stage_q, path_points):
+    approve(env, urdf_text, stage_q, path_points)
+    env.at(np.full(7, np.nan))
+    for action in ("stage", "rest", "recover", "plan_stage"):
+        res = env.run(action)
+        assert res.status == Result.STATUS_FAILED and res.error_code
+    assert not env.fake.goals["execute_joint_trajectory"]
+
+
+def test_a_driver_without_a_model_refuses_with_no_model(env, monkeypatch):
+    from capability_engine.sim import SimModelError
+
+    def no_model():
+        raise SimModelError("no urdf")
+
+    monkeypatch.setattr(env.engine.arm, "robot_description", no_model)
+    env.at(HOME)
+    res = env.run("plan_stage")
+    assert (res.status, res.error_code) == (Result.STATUS_FAILED, "no_model")

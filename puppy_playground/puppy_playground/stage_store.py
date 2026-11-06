@@ -99,8 +99,10 @@ def load(path, urdf_text, stage_q=None, chain=None):
         )
         if not (np.isfinite(sp.q_rest).all() and np.isfinite(sp.stage_q).all()):
             raise ValueError("q_rest and stage_q must be finite")
-        if not (np.isfinite(sp.margin_m) and sp.margin_m >= 0.0):
-            raise ValueError("margin_m must be finite and not negative")
+        margin = doc["margin_m"]
+        # The margin is not a file choice: a larger one makes the rules quieter, not stricter.
+        if isinstance(margin, bool) or not isinstance(margin, (int, float)) or margin != MARGIN_M:
+            raise ValueError(f"margin_m must be exactly {MARGIN_M}, not {margin!r}")
         if sp.q_rest.shape != (7,) or sp.stage_q.shape != (7,):
             raise ValueError("q_rest and stage_q need 7 joints")
         if not all(np.isfinite(x).all() for _, q, dq in pts for x in (q, dq)):
@@ -110,5 +112,7 @@ def load(path, urdf_text, stage_q=None, chain=None):
     if sp.urdf_sha256 != urdf_hash(urdf_text):
         raise StageStoreError("stale_stage_path", f"{path} was planned for another URDF")
     if stage_q is not None:
+        if chain is None:
+            raise TypeError("load: `chain` is required when `stage_q` is given")
         check_endpoints(sp, chain, stage_q)
     return sp

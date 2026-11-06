@@ -32,6 +32,7 @@ from . import motion, stage_store
 
 STILL_RAD_S = 0.02  # every |dq| must be below this to start a move
 AT_TOL_RAD = 0.02  # "at" a path sample
+MOVED_RAD = 1e-3  # recover: the reading may change this little between the check and the send
 RECOVER_STAGE_RAD = 0.10  # recover: this close to the stage pose, min-jerk to it
 STAGE_PATH = "/data/stage_path.json"
 CANDIDATE_PATH = "/data/stage_path.candidate.json"
@@ -76,6 +77,8 @@ class PuppyPlayground(CapabilityEngine):
             "playground.candidate_path", CANDIDATE_PATH
         ).value
         self.log_path = self.declare_parameter("playground.log", LOG_PATH).value
+        # a plan-only instance (the plan_stage run on the live ROS domain) refuses every other action
+        self.plan_only = bool(self.declare_parameter("plan_only", False).value)
 
 
         self._checked = {}  # (path sha256, chair-scene commit, urdf sha256) -> violations
@@ -121,6 +124,12 @@ class PuppyPlayground(CapabilityEngine):
         continuous joints (the driver reports those wrapped). NaN is never near."""
         return bool(np.all(np.abs(shortest_delta(chain, q, target)) <= tol))
 
+    def _unmoved(self, chain, q):
+        """Re-read the arm just before sending: refuse unless it is within MOVED_RAD of `q`."""
+        q2 = self._still_q()
+        if not self._near(chain, q, q2, MOVED_RAD):
+            raise EngineError("moved", "the arm moved while the move was being checked", recoverable=True)
+
     def _held(self):
         try:
             pos = self.arm.gripper_state().position
@@ -140,8 +149,8 @@ class PuppyPlayground(CapabilityEngine):
             raise EngineError(e.code, str(e))
         key = (sp.file_sha256, CHAIR_LAYERS_COMMIT, stage_store.urdf_hash(urdf_text))
         if key not in self._checked:
-            # never looser than the margin this engine writes candidates with
-            self._checked[key] = self._path_violations(sp.points, chain, max(sp.margin_m, stage_store.MARGIN_M))
+            # exactly the margin candidates are written with (load refuses any other value)
+            self._checked[key] = self._path_violations(sp.points, chain, stage_store.MARGIN_M)
         if self._checked[key]:
             v = self._checked[key][0]
             raise EngineError("unsafe_stage_path", f"{v.rule}: {v.detail}")
@@ -186,6 +195,8 @@ class PuppyPlayground(CapabilityEngine):
             raise EngineError("not_yet", f"{action_id} is not implemented yet")
         rec = {"t": time.time(), "action": action_id, "params": params}
         try:
+            if self.plan_only and action_id != "plan_stage":
+                raise EngineError("plan_only", "this instance is plan-only", recoverable=True)
             out = handler(ctx, rec)
             rec["ok"] = True
             return out
@@ -259,9 +270,10 @@ class PuppyPlayground(CapabilityEngine):
         return escape_path(chain, chair_scene(), q, target)
 
     def _stage(self, ctx, rec):
-        ctx.checkpoint()
         urdf_text, chain = self._urdf()
         sp = self._load(self.stage_path, urdf_text, chain, self._stage_q(chain))
+        # slow, reading-independent work is done: a pause blocks here, then the reading is taken
+        ctx.checkpoint()
         q = self._still_q()
         if not self._near(chain, q, sp.points[0][1], AT_TOL_RAD):
             raise EngineError("not_at_start", "the arm is not at the path's start (rest)")
@@ -269,7 +281,6 @@ class PuppyPlayground(CapabilityEngine):
         return {"points": len(sp.points)}
 
     def _rest(self, ctx, rec):
-        ctx.checkpoint()
         urdf_text, chain = self._urdf()
         sp = self._load(self.stage_path, urdf_text, chain, self._stage_q(chain))
         pts = stage_rules.points_from_q(np.array([p[1] for p in sp.points])[::-1])
@@ -277,6 +288,7 @@ class PuppyPlayground(CapabilityEngine):
         rec["checks"] = [f"{v.rule}: {v.detail}" for v in bad]
         if bad:
             raise EngineError("unsafe_stage_path", f"reversed path: {bad[0].rule}: {bad[0].detail}")
+        ctx.checkpoint()
         q = self._still_q()
         if not self._near(chain, q, sp.points[-1][1], AT_TOL_RAD):
             raise EngineError("not_at_end", "the arm is not at the path's end (stage)")
@@ -284,13 +296,13 @@ class PuppyPlayground(CapabilityEngine):
         return {"points": len(pts)}
 
     def _recover(self, ctx, rec):
-        ctx.checkpoint()
         urdf_text, chain = self._urdf()
         stage_q = self._stage_q(chain)
         try:  # only needed off the stage pose; loaded (and re-checked) before measuring
             sp = self._load(self.stage_path, urdf_text, chain, stage_q)
         except EngineError:
             sp = None
+        ctx.checkpoint()
         q = self._still_q()
         if self._near(chain, q, stage_q, RECOVER_STAGE_RAD):
             target = q + shortest_delta(chain, q, stage_q)
@@ -302,6 +314,7 @@ class PuppyPlayground(CapabilityEngine):
             rec["checks"] = [f"{v.rule}: {v.detail}" for v in bad]
             if bad:
                 raise EngineError("unsafe_move", f"{bad[0].rule}: {bad[0].detail}")
+            self._unmoved(chain, q)
             self._send(chain, pts, q, rec)
             return {"recovered": "to_stage", "points": len(pts)}
         if sp is None:
@@ -321,6 +334,7 @@ class PuppyPlayground(CapabilityEngine):
         rec["checks"] = [f"{v.rule}: {v.detail}" for v in bad]
         if bad:
             raise EngineError("unsafe_move", f"{bad[0].rule}: {bad[0].detail}")
+        self._unmoved(chain, q)
         self._send(chain, pts, q, rec)
         return {"recovered": "along_path", "points": len(pts)}
 
