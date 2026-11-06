@@ -159,7 +159,7 @@ class UiController:
             if not ok and not cancelled:
                 self._refusal = {"action": kind, "error_code": error_code, "message": message}
             if kind == "auto":
-                self._run(self.sup.goal_done(error_code or None))
+                self._run(self.sup.goal_done(error_code or None, cancelled=cancelled))
 
     # -- HTTP -----------------------------------------------------------------
 
@@ -259,7 +259,7 @@ class UiController:
                 self._cancel()
             elif isinstance(cmd, SendAuto):
                 if self._active is not None:  # a cancelled goal has not ended yet: try again later
-                    self._run(self.sup.goal_done())
+                    self._run(self.sup.retry_later())
                 else:
                     self._send("auto", {"size": cmd.size, "seed": cmd.seed})
 

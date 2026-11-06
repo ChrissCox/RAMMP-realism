@@ -266,6 +266,19 @@ def test_auto_is_not_resent_while_the_cancelled_goal_is_still_active(ui):
         ui.advance(1)
         ui.ctl.engine_status("t", "idle")
     assert len(ui.backend.goals) == 2
+    assert ui.sup.off_reason is None  # a lagging cancelled goal never turns auto off
+
+
+def test_a_task_cancelled_auto_goal_resumes_after_the_task(ui):
+    token = start_auto(ui)
+    ui.ctl.engine_status("rammp_task", "executing")  # a task starts: the supervisor cancels auto
+    ui.ctl.goal_finished(token, False, "cancelled", cancelled=True)
+    assert ui.sup.state.value != "off" and ui.sup.off_reason is None
+    for _ in range(10):
+        ui.advance(1)
+        ui.ctl.engine_status("rammp_task", "idle")
+        ui.ctl.engine_status("puppy_playground", "idle", {"state": "idle"})
+    assert len(ui.backend.goals) == 2  # auto resumed once the task ended
 
 
 def test_the_ending_of_the_auto_goal_does_not_send_a_cancel(ui):
