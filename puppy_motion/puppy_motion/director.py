@@ -38,6 +38,9 @@ BUDGETS = {"demo": 6.0, "subtle": 2.5}
 SUBTLE_MIN_KEEP = 6  # the subtle preset plays only rules at least this important
 LOCK_ON_MODES = ("view", "standoff")
 EPS = 1e-9
+RESERVE_MIN_KEEP = 1  # a rule this unimportant (or less) never reserves time
+ENDING_RESERVE_KEEP = 6  # an ending reaction reserves time for its essential rules only (proud, sorry): the
+# whole failure reaction (search, sorry, shake_off) would be 5.7 s of a 6 s budget
 T_ON = 0.1  # a beat's motion starts this long into its track
 TAIL_S = 0.2
 CACHE_MAX = 512
@@ -57,6 +60,7 @@ LOCK_LEAN_M = 0.025  # the full lock-on leans in this far (short: B.LOCK_LEAN_M)
 PROUD_HOLD_S = 0.2
 PROUD_FLOURISH_S = 1.2
 PROUD_LOOK_MAX_RAD = np.radians(12.0)
+PROUD_SHORT_LOOK_MAX_RAD = np.radians(3.0)  # the short proud's look is small: it fits the subtle budget (<= 2 s)
 ATTENTIVE_HOLD_S, ATTENTIVE_SHORT_HOLD_S = 0.8, 0.2
 SEARCH_SPOTS = B.SEARCH_SPOTS[:2]
 SEARCH_SHORT_SPOTS = B.SEARCH_SPOTS[:1]
@@ -205,10 +209,11 @@ def _lock_on(ctx, target, held, short):
 
 
 def _proud(ctx, target, held, short):
+    turn = PROUD_SHORT_LOOK_MAX_RAD if short else PROUD_LOOK_MAX_RAD
     t_look = T_ON + B.PROUD_LOOK_AT_S
-    t_there = t_look + B.user_turn_s(ctx, t_look, held, PROUD_LOOK_MAX_RAD, B.PROUD_LIFT_M)
+    t_there = t_look + B.user_turn_s(ctx, t_look, held, turn, B.PROUD_LIFT_M)
     t_end = t_there + (PROUD_HOLD_S if short else PROUD_FLOURISH_S)
-    return [B.proud(ctx, T_ON, t_end, flourish=None if short else "clack", max_turn_rad=PROUD_LOOK_MAX_RAD)]
+    return [B.proud(ctx, T_ON, t_end, flourish=None if short else "clack", max_turn_rad=turn)]
 
 
 def _attentive(ctx, target, held, short):
@@ -298,15 +303,19 @@ class Director:
         """The beats to play now, in order: each starts and ends at q_now and passes check_beat."""
         if not isinstance(event, EVENTS):
             raise TypeError(f"not a director event: {event!r}")
-        q_now, held = np.asarray(q_now, dtype=float), bool(held)
         name = type(event).__name__
+        try:
+            q_now, held = np.asarray(q_now, dtype=float), bool(held)
+        except Exception as e:
+            self.log.append(f"{name}: nothing (bad q_now: {type(e).__name__}: {e})")
+            return []
         if isinstance(event, Phase):
             return self._on_phase(event)
         if isinstance(event, TaskRequested):
             self._requested = True
         if isinstance(event, BeforeMove):
             self._precise_move = bool(event.precise_end)
-        if isinstance(event, (Succeeded, Failed)):
+        if isinstance(event, Succeeded) or isinstance(event, Failed) and not event.recoverable:
             self._over = True
         if isinstance(event, Failed) and not event.recoverable:
             self.log.append(f"{name}(False): nothing")
@@ -321,7 +330,11 @@ class Director:
                 self.log.append(f"{name}: nothing (the move ended at a precise pose; the arm stays settled)")
                 return []
             floor = self._entry.zone if self._entry is not None else Zone.FREE
-        zone = zone_at(self.chain, self.scene, q_now, held, floor)
+        try:
+            zone = zone_at(self.chain, self.scene, q_now, held, floor)
+        except Exception as e:  # a malformed q_now is refused, not raised
+            self.log.append(f"{name}: nothing (bad q_now: {type(e).__name__}: {e})")
+            return []
         if held and zone is Zone.NEAR_USER:
             self.log.append(f"{name}: nothing (holding something near the person)")
             return []
@@ -333,6 +346,8 @@ class Director:
             if beat is not None:
                 chosen[i] = beat
                 self.spent_s += beat.duration
+        if isinstance(event, Failed):  # a recoverable failure may be followed by a retry and its ending
+            self._done -= {j for j, r in enumerate(self.rules) if r.ending is not None}
         return [chosen[i] for i in matched if i in chosen]
 
     # ----------------------------------------------------------------- internals
@@ -367,21 +382,23 @@ class Director:
         return None
 
     def _reserve(self, i, q_now, held, zone):
-        """Seconds kept from rule i for rules that matter more and may still come, in their short
-        versions: the larger of the two endings' (they exclude each other), plus the mid-task rules."""
+        """Seconds kept from rule i, in short versions, for what may still come. An ending reaction
+        reserves nothing. Any other beat keeps the larger of the success and the failure reaction
+        (their essential rules, keep >= ENDING_RESERVE_KEEP, that the preset plays), plus the other
+        higher-keep mid-task rules not yet decided."""
         rule = self.rules[i]
+        if rule.ending is not None or self._over:
+            return 0.0
         mid, endings = 0.0, {}
         for j, o in enumerate(self.rules):
-            if j == i or j in self._done:
+            if j == i or j in self._done or o.keep <= RESERVE_MIN_KEEP or o.keep < self.min_keep:
                 continue
-            if o.ending is None:
-                if self._over or o.keep <= rule.keep:
+            if o.ending is not None:
+                if o.keep < ENDING_RESERVE_KEEP:
                     continue
-                if o.event == "TaskRequested" and self._requested:
-                    continue
-                mid += self._short_s(o, q_now, held, zone)
-            elif o.keep > rule.keep and (rule.ending is None and not self._over or o.ending == rule.ending):
                 endings[o.ending] = endings.get(o.ending, 0.0) + self._short_s(o, q_now, held, zone)
+            elif o.keep > rule.keep and not (o.event == "TaskRequested" and self._requested):
+                mid += self._short_s(o, q_now, held, zone)
         return mid + max(endings.values(), default=0.0)
 
     def _short_s(self, rule, q_now, held, zone):
@@ -401,9 +418,12 @@ class Director:
             while len(_CACHE) > CACHE_MAX:
                 _CACHE.popitem(last=False)
         beat, why = hit[0], hit[1]
-        if beat is None and tag:
-            self.log.append(f"{tag}: {'short' if short else 'full'} not played ({why})")
-        return beat
+        if beat is None:
+            if tag:
+                self.log.append(f"{tag}: {'short' if short else 'full'} not played ({why})")
+            return None
+        # a copy: the cache is shared, and a caller may shift or edit the points it is given
+        return Beat(beat.name, beat.mood, [(t, q.copy(), dq.copy()) for t, q, dq in beat.points], beat.zone)
 
     def _compose(self, name, short, q_now, held, zone):
         build, length_s = BEATS[name]
