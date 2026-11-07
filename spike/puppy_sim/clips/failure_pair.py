@@ -27,7 +27,7 @@ def build():
 
 CLIP = PairClip(
     name="failure_pair",
-    title="When it fails: puzzled, sorry, shake it off",
+    title="When it fails: sorry, shake it off",
     subtitle="real run: its camera's two views of the container disagreed by over 1 cm, so it refused to grab",
     camera="counter",
     build=build,
