@@ -232,7 +232,7 @@ def load_candidate(path):
         doc = json.loads(Path(path).read_bytes())
         cap = doc.get("person_floor_cap_m", 0.0)
         cap = float(cap) if isinstance(cap, (int, float)) and not isinstance(cap, bool) else 0.0
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, OverflowError, TypeError):  # a huge integer: load says why
         cap = 0.0  # store.load reports the unreadable file below
     try:
         sp = store.load(path, urdf_text(), stage_pose(ch, sc), ch, floor_cap_m=cap)

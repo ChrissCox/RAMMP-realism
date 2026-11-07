@@ -70,7 +70,66 @@ def test_with_the_cap_the_users_pose_plans_min_jerk_and_the_file_loads_only_with
     env.at(USERS_POSE)
     res = env.run("stage")
     assert res.status == Result.STATUS_SUCCESS, (res.error_code, res.payload_json)
-    assert env.fake.goals["execute_joint_trajectory"]
+    assert len(env.fake.goals["execute_joint_trajectory"]) == 1
+    # Rest returns along the same file (it checks caps and ends only)
+    env.at(stage_q)
+    res = env.run("rest")
+    assert res.status == Result.STATUS_SUCCESS, (res.error_code, res.payload_json)
+    assert len(env.fake.goals["execute_joint_trajectory"]) == 2
+
+
+def test_the_cap_and_plan_only_are_read_only_at_run_time(env_cap):
+    from rclpy.parameter import Parameter
+
+    for name, value, attr, kept in (
+        ("playground.stage_floor_cap_m", 0.0, "stage_floor_cap_m", 0.02),
+        ("plan_only", True, "plan_only", False),
+    ):
+        r = env_cap.engine.set_parameters([Parameter(name, value=value)])[0]
+        assert not r.successful, name
+        assert getattr(env_cap.engine, attr) == kept
+        assert env_cap.engine.get_parameter(name).value == kept  # ROS never reports a value the engine isn't using
+
+
+def test_launch_turns_the_argument_into_a_float_for_both_nodes():
+    import importlib.util
+    from pathlib import Path
+
+    from launch import LaunchContext
+    from launch.utilities import perform_substitutions
+    from launch_ros.parameter_descriptions import ParameterValue
+
+    path = Path(__file__).resolve().parents[1] / "launch" / "playground.launch.py"
+    spec = importlib.util.spec_from_file_location("playground_launch2", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    found = []
+
+    def walk(x, depth=0):
+        if depth > 6:
+            return
+        if isinstance(x, dict):
+            for k, v in x.items():
+                name = k if isinstance(k, str) else "".join(getattr(t, "text", "") for t in k)
+                if name == "playground.stage_floor_cap_m":
+                    found.append(v)
+                walk(v, depth + 1)
+        elif isinstance(x, (list, tuple)):
+            for v in x:
+                walk(v, depth + 1)
+        elif hasattr(x, "__dict__") and not isinstance(x, (str, bytes)):
+            walk(vars(x), depth + 1)
+
+    for e in module.generate_launch_description().entities:
+        if type(e).__name__ == "Node":
+            walk(vars(e))
+    assert len(found) == 2, found  # the engine and the UI
+    ctx = LaunchContext()
+    ctx.launch_configurations["stage_floor_cap_m"] = "0.02"
+    for v in found:
+        assert isinstance(v, ParameterValue)
+        got = v.evaluate(ctx)
+        assert isinstance(got, float) and got == 0.02
 
 
 def test_a_file_approved_under_the_cap_is_refused_by_an_engine_without_it(env, urdf_text, stage_q, path_points):
@@ -115,7 +174,7 @@ def test_an_old_file_without_the_key_reads_as_off(tmp_path, urdf_text, stage_q, 
         stage_store.load(f, urdf_text, stage_q, chain, floor_cap_m=0.02)
 
 
-@pytest.mark.parametrize("bad", [True, "0.02", None, float("nan"), float("inf"), -0.02, 0.05, [0.02]])
+@pytest.mark.parametrize("bad", [True, "0.02", None, float("nan"), float("inf"), -0.02, 0.05, [0.02], 10**400])
 def test_the_cap_in_a_file_is_type_and_value_checked(tmp_path, urdf_text, stage_q, path_points, bad):
     chain = Chain.from_urdf(urdf_text)
     f = tmp_path / "x.json"

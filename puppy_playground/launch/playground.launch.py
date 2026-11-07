@@ -58,7 +58,12 @@ def generate_launch_description():
                 package="puppy_playground",
                 executable="puppy_playground_ui",
                 name="puppy_playground_ui",
-                parameters=[{"playground.ui_port": ParameterValue(arg("ui_port"), value_type=int)}],
+                parameters=[
+                    {
+                        "playground.ui_port": ParameterValue(arg("ui_port"), value_type=int),
+                        "playground.stage_floor_cap_m": ParameterValue(arg("stage_floor_cap_m"), value_type=float),
+                    }
+                ],
                 output="screen",
             ),
         ]

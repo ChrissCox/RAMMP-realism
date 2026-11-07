@@ -89,7 +89,8 @@ def candidate_title(c):
     if c.error:
         return "Stage path candidate: UNREADABLE - NOT APPROVABLE"
     verdict = "REVIEW FOR APPROVAL" if c.approvable else "NOT APPROVABLE"
-    return f"Stage path candidate {c.sha256[:12]}: {c.method}, {c.duration:.1f} s - {verdict}"
+    cap = " - ATTENDED FLOOR CAP 20 mm" if c.floor_cap_m else ""
+    return f"Stage path candidate {c.sha256[:12]}: {c.method}, {c.duration:.1f} s{cap} - {verdict}"
 
 
 def candidate_subtitle(c):

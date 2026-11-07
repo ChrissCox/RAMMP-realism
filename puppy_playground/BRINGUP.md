@@ -148,7 +148,10 @@ The cap is written into the candidate file (`person_floor_cap_m`), and the engin
 whose cap differs from its own (`bad_stage_path`): a file approved under the cap only replays with
 `stage_floor_cap_m:=0.02`, and a file planned without it only replays without. If you change the
 setting, plan and approve again. The simulator render (step 5) reads the cap from the file, checks with
-the same rule and says `ATTENDED FLOOR CAP 20 mm` in its subtitle.
+the same rule and says `ATTENDED FLOOR CAP 20 mm` in its title and subtitle. The engine logs the cap
+at startup, and the page shows an `ATTENDED FLOOR CAP 20 mm` banner (and `/status` carries `floor_cap_m`)
+while it is on. Both settings are read-only at run time: to change them, restart with the new launch
+argument.
 
 ## 4. Plan the stage path (no motion; `plan_only`)
 
@@ -208,7 +211,8 @@ not overwritten.
 
 The clip plays the candidate file's own points, forward to the stage pose and back, on flatbot's chair
 boxes, and re-checks it with the engine's rules (chair scene grown by the file's margin). Approve ONLY
-if the title reads "Stage path candidate <12 hex>: <method>, <seconds> s - REVIEW FOR APPROVAL" and no
+if the title reads "Stage path candidate <12 hex>: <method>, <seconds> s - REVIEW FOR APPROVAL" (with the cap on, the title also says `ATTENDED FLOOR CAP 20 mm` before
+`REVIEW FOR APPROVAL`: approve it only if you meant to plan with the cap) and no
 violations are listed. The 12 hex digits are the first 12 of the candidate file's sha256: before the `cp`
 below, run `sha256sum ~/puppy-data/stage_path.candidate.json` on snorlax and check that it starts with
 the same 12 digits. If it does not, the file you reviewed is not the file you would approve. A title with "NOT APPROVABLE" (violations, or a file that cannot be read) means

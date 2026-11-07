@@ -9,6 +9,7 @@ runtime re-check cache."""
 
 import hashlib
 import json
+import math
 import os
 from dataclasses import dataclass
 
@@ -111,10 +112,14 @@ def load(path, urdf_text, stage_q=None, chain=None, floor_cap_m=0.0):
         if isinstance(margin, bool) or not isinstance(margin, (int, float)) or margin != MARGIN_M:
             raise ValueError(f"margin_m must be exactly {MARGIN_M}, not {margin!r}")
         cap = doc["person_floor_cap_m"] if "person_floor_cap_m" in doc else 0.0
-        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or not np.isfinite(cap) or cap < 0:
-            raise ValueError(f"person_floor_cap_m must be a finite number >= 0, not {cap!r}")
+        try:
+            ok = not isinstance(cap, bool) and isinstance(cap, (int, float)) and math.isfinite(cap) and cap >= 0
+        except OverflowError:  # an integer too large for a float
+            ok = False
+        if not ok:
+            raise ValueError(f"person_floor_cap_m must be a finite number >= 0, not {cap!r:.60}")
         if cap not in (0.0, ATTENDED_FLOOR_CAP_M):
-            raise ValueError(f"person_floor_cap_m must be 0.0 or {ATTENDED_FLOOR_CAP_M}, not {cap!r}")
+            raise ValueError(f"person_floor_cap_m must be 0.0 or {ATTENDED_FLOOR_CAP_M}, not {cap!r:.60}")
         if cap != floor_cap_m:
             raise ValueError(
                 f"it was approved with person_floor_cap_m {cap}, this engine runs with {floor_cap_m}: "
@@ -125,7 +130,7 @@ def load(path, urdf_text, stage_q=None, chain=None, floor_cap_m=0.0):
             raise ValueError("q_rest and stage_q need 7 joints")
         if not all(np.isfinite(x).all() for _, q, dq in pts for x in (q, dq)):
             raise ValueError("non-finite number")
-    except (ValueError, KeyError, TypeError) as e:
+    except (ValueError, KeyError, TypeError, OverflowError) as e:
         raise StageStoreError("bad_stage_path", f"{path} is not a stage path: {e}")
     if sp.urdf_sha256 != urdf_hash(urdf_text):
         raise StageStoreError("stale_stage_path", f"{path} was planned for another URDF")

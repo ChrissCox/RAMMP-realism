@@ -89,6 +89,7 @@ class UiController:
         self._last_done = None  # {"action", "result": ok|refused|cancelled} of the last finished goal
         self._last_cancel = -1e9
         self._stop_deadline = None
+        self.floor_cap_m = 0.0  # the launch's stage_floor_cap_m (set by UiNode), shown on the page
         self._stopped_tokens = set()  # tokens /stop was pressed for (cancel them when the handle arrives)
 
     # -- inputs from ROS ------------------------------------------------------
@@ -175,6 +176,7 @@ class UiController:
                 "off_reason": self.sup.off_reason,
                 "busy": self._active is not None,
                 "estopped": self._estopped,
+                "floor_cap_m": self.floor_cap_m,
             }
 
     def post(self, path, body):
@@ -328,6 +330,7 @@ JOINT_STALE_S = 0.5  # no joint_states for this long: the arm is not known to be
 def main(args=None):
     import rclpy
     from rammp_common_interfaces.msg import ControlStatus
+    from rcl_interfaces.msg import ParameterDescriptor
     from rammp_orchestrator_interfaces.action import ExecuteAction
     from rammp_orchestrator_interfaces.msg import Result
     from rammp_orchestrator_interfaces.srv import Control
@@ -348,6 +351,10 @@ def main(args=None):
             super().__init__("puppy_playground_ui")
             self.declare_parameter("playground.ui_port", 8080)
             self.declare_parameter("playground.preview_dir", "")
+            # the same launch argument the engine gets; read-only so the page never shows a stale value
+            cap = self.declare_parameter(
+                "playground.stage_floor_cap_m", 0.0, ParameterDescriptor(read_only=True)
+            ).value
             self._group = ReentrantCallbackGroup()
             self._client = ActionClient(
                 self, ExecuteAction, "/puppy_playground/execute_action", callback_group=self._group
@@ -362,6 +369,7 @@ def main(args=None):
             self._moving_at = time.monotonic()
             self._last_joint = None
             self.controller = UiController(self, Supervisor(time.monotonic))
+            self.controller.floor_cap_m = float(cap)
             # /joint_states is published BEST_EFFORT (sensor data); /control_status is latched.
             self.create_subscription(
                 JointState, "/joint_states", self._on_joints, qos_profile_sensor_data,

@@ -15,6 +15,7 @@ import time
 from importlib import resources
 
 import numpy as np
+from rcl_interfaces.msg import ParameterDescriptor
 from capability_engine.arm import IMPEDANCE, QUEUE
 from capability_engine.driver_state import ArmError, ControlTaken, EStopped
 from capability_engine.engine import Action, CapabilityEngine, EngineError, run
@@ -87,9 +88,20 @@ class PuppyPlayground(CapabilityEngine):
         ).value
         self.log_path = self.declare_parameter("playground.log", LOG_PATH).value
         # a plan-only instance (the plan_stage run on the live ROS domain) refuses every other action
-        self.plan_only = bool(self.declare_parameter("plan_only", False).value)
+        # read-only: both are read once here, so a runtime `ros2 param set` must not appear to change them
+        read_only = ParameterDescriptor(read_only=True)
+        self.plan_only = bool(self.declare_parameter("plan_only", False, read_only).value)
         # 0.0 (off, the default) or ATTENDED_FLOOR_CAP_M; any other value refuses every action (execute)
-        self.stage_floor_cap_m = float(self.declare_parameter("playground.stage_floor_cap_m", 0.0).value)
+        self.stage_floor_cap_m = float(self.declare_parameter("playground.stage_floor_cap_m", 0.0, read_only).value)
+        if self.stage_floor_cap_m == ATTENDED_FLOOR_CAP_M:
+            self.get_logger().warning(
+                f"ATTENDED FLOOR CAP {ATTENDED_FLOOR_CAP_M * 1000:.0f} mm is ON: stage-path person floors are "
+                "min(first sample, cap). For attended tests with NOBODY in the chair only."
+            )
+        elif self.stage_floor_cap_m == 0.0:
+            self.get_logger().info("floor cap off")
+        else:
+            self.get_logger().error(f"stage_floor_cap_m {self.stage_floor_cap_m!r} is invalid: every action will refuse (bad_config)")
 
         self._checked = {}  # (path sha256, chair-scene commit, urdf sha256) -> violations
         self._chains = {}  # urdf sha256 -> Chain

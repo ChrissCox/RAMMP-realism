@@ -444,3 +444,11 @@ def test_a_stop_code_from_the_auto_goal_turns_auto_off_and_shows_the_reason(ui):
     ui.advance(30)
     assert len(ui.backend.goals) == 1  # nothing more is sent
     assert ui.post("/stage")[0] == 200  # the user can act again
+
+
+def test_status_carries_the_floor_cap_and_the_page_shows_it(ui):
+    assert json.loads(ui.get("/status")[1])["floor_cap_m"] == 0.0
+    ui.ctl.floor_cap_m = 0.02
+    assert json.loads(ui.get("/status")[1])["floor_cap_m"] == 0.02
+    page = ui.get("/")[1].decode()
+    assert "ATTENDED FLOOR CAP 20 mm" in page and "floor_cap_m" in page

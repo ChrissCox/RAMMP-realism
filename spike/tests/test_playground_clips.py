@@ -190,3 +190,18 @@ def test_a_candidate_with_a_bad_cap_is_unreadable(tmp_path):
         f.write_text(json.dumps(doc))
         clip = ps.make_clip(f)
         assert clip.candidate.error and "NOT APPROVABLE" in clip.title, bad
+
+
+def test_floor_cap_candidate_title_says_so(tmp_path):
+    assert "ATTENDED FLOOR CAP 20 mm" in ps.make_clip(_pose_candidate(tmp_path, 0.02)).title
+    assert "FLOOR CAP" not in ps.make_clip(_pose_candidate(tmp_path, 0.0, "off.json")).title
+
+
+def test_a_huge_or_non_finite_cap_fails_closed_with_a_message(tmp_path):
+    f = _pose_candidate(tmp_path, 0.0)
+    text = f.read_text()
+    for bad in ("1" + "0" * 400, "NaN", "Infinity", "-Infinity"):
+        f.write_text(text.replace('"person_floor_cap_m": 0.0', f'"person_floor_cap_m": {bad}'))
+        clip = ps.make_clip(f)  # must not raise
+        assert clip.candidate.error and "person_floor_cap_m" in clip.candidate.error, bad
+        assert "NOT APPROVABLE" in clip.title
