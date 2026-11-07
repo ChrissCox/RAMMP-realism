@@ -35,6 +35,9 @@ def generate_launch_description():
             # 0.0 = off. 0.02 = ATTENDED floor cap, for attended tests with NOBODY in the chair; any other
             # value makes the engine refuse every action (bad_config). See BRINGUP.md.
             DeclareLaunchArgument("stage_floor_cap_m", default_value="0.0"),
+            # false (default). true: the engine replays a stage path that fails the start gate or was planned with
+            # check_home --ignore-start-gate (the attended operator's call). Read-only. See BRINGUP.md.
+            DeclareLaunchArgument("accept_skipped_start_gate", default_value="false"),
             DeclareLaunchArgument("mock_urdf", default_value=""),
             DeclareLaunchArgument("mock_joints", default_value=UPSTREAM_MOCK_JOINTS),
             DeclareLaunchArgument("ui_port", default_value="8080"),
@@ -48,6 +51,7 @@ def generate_launch_description():
                         "mock": ParameterValue(arg("mock"), value_type=bool),
                         "plan_only": ParameterValue(arg("plan_only"), value_type=bool),
                         "playground.stage_floor_cap_m": ParameterValue(arg("stage_floor_cap_m"), value_type=float),
+                        "playground.accept_skipped_start_gate": ParameterValue(arg("accept_skipped_start_gate"), value_type=bool),
                         "arm.mock_urdf": ParameterValue(arg("mock_urdf"), value_type=str),
                         "arm.mock_joints": ParameterValue(arg("mock_joints"), value_type=List[float]),
                     }

@@ -90,16 +90,21 @@ def candidate_title(c):
         return "Stage path candidate: UNREADABLE - NOT APPROVABLE"
     verdict = "REVIEW FOR APPROVAL" if c.approvable else "NOT APPROVABLE"
     cap = " - ATTENDED FLOOR CAP 20 mm" if c.floor_cap_m else ""
-    return f"Stage path candidate {c.sha256[:12]}: {c.method}, {c.duration:.1f} s{cap} - {verdict}"
+    gate = " - START GATE SKIPPED" if c.start_gate == "skipped" else ""
+    return f"Stage path candidate {c.sha256[:12]}: {c.method}, {c.duration:.1f} s{cap}{gate} - {verdict}"
 
 
 def candidate_subtitle(c):
     if c.error:
         return [f"NOT APPROVABLE: {c.error[:90]}", c.path[-90:]]
-    if c.approvable:
-        verdict = "no stage-path violations (grown by the engine's margin)"
-    else:
+    if c.gate_fail and c.start_gate != "skipped":
+        verdict = f"NOT APPROVABLE: fails the start gate ({c.gate_fail[:60]}) and the file does not record it as skipped"
+    elif c.violations:
         verdict = f"NOT APPROVABLE: {len(c.violations)} violation(s), first {c.violations[0][:50]}"
+    else:
+        verdict = "no stage-path violations (grown by the engine's margin)"
+    if c.start_gate == "skipped":
+        verdict = f"START GATE SKIPPED (the engine replays it only with accept_skipped_start_gate:=true): {verdict}"
     if c.floor_cap_m:
         verdict = f"{CAP_NOTE}: {verdict}"
     return [f"the candidate file itself, forward then back; {LEGEND}", verdict]

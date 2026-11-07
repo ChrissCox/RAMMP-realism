@@ -210,10 +210,15 @@ class Candidate:
     error: str = ""
     floor_cap_m: float = 0.0  # the attended floor cap the file records (0.0 = off)
     sha256: str = ""  # of the file's bytes, to compare with `sha256sum` before it is copied
+    start_gate: str = ""  # what the file records: "passed", "skipped" or "" (an older file)
+    gate_fail: str = ""  # why the first sample fails the engine's start gate ("" = it passes)
 
     @property
     def approvable(self):
-        return not self.error and not self.violations
+        # a start that fails the gate is not approvable unless the file records that it was skipped
+        # (then the title says so: the engine replays it only with accept_skipped_start_gate:=true)
+        gate_ok = not self.gate_fail or self.start_gate == "skipped"
+        return not self.error and not self.violations and gate_ok
 
 
 def load_candidate(path):
@@ -235,7 +240,8 @@ def load_candidate(path):
     except (OSError, ValueError, AttributeError, OverflowError, TypeError):  # a huge integer: load says why
         cap = 0.0  # store.load reports the unreadable file below
     try:
-        sp = store.load(path, urdf_text(), stage_pose(ch, sc), ch, floor_cap_m=cap)
+        # accept_skipped_start_gate: the render reads the file either way and reports the gate itself
+        sp = store.load(path, urdf_text(), stage_pose(ch, sc), ch, floor_cap_m=cap, accept_skipped_start_gate=True)
     except store.StageStoreError as e:
         cand.error = f"{e.code}: {e}"
         return cand
@@ -243,6 +249,8 @@ def load_candidate(path):
     cand.duration = float(sp.points[-1][0])
     grown = escape.grown_scene(sc, max(sp.margin_m, store.MARGIN_M))
     cand.floor_cap_m = sp.person_floor_cap_m
+    cand.start_gate = sp.start_gate
+    cand.gate_fail = store.bad_start(ch, sp.points[0][1]) or ""
     ref = None  # None = each part's first sample, exactly as the engine does with no cap
     if cand.floor_cap_m:
         from puppy_motion.geometry import clearances_batch

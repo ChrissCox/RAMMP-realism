@@ -205,3 +205,56 @@ def test_a_huge_or_non_finite_cap_fails_closed_with_a_message(tmp_path):
         clip = ps.make_clip(f)  # must not raise
         assert clip.candidate.error and "person_floor_cap_m" in clip.candidate.error, bad
         assert "NOT APPROVABLE" in clip.title
+
+
+INSIDE_OCCUPANT = np.deg2rad([22.9, 114.2, -43.4, -71.2, -15.7, 36.2, -143.6])  # fails the start gate
+
+
+def _deep_candidate(tmp_path, start_gate=None):
+    """A min_jerk candidate from a start that fails the gate; start_gate None = written without the key."""
+    from puppy_motion import stage
+    from puppy_motion.joints import shortest_delta
+    from puppy_sim.clips.playground_common import stage_store
+
+    ch, q_stage = chain(), stage_pose()
+    target = INSIDE_OCCUPANT + shortest_delta(ch, INSIDE_OCCUPANT, q_stage)
+    pts = stage.retime_path(stage.min_jerk_path(INSIDE_OCCUPANT, target, 6.0), ch)
+    path = tmp_path / "deep.candidate.json"
+    stage_store().save(path, pts, urdf_text(), q_stage, method="min_jerk")
+    doc = json.loads(path.read_text())
+    if start_gate is None:
+        doc.pop("start_gate")
+    else:
+        doc["start_gate"] = start_gate
+    path.write_text(json.dumps(doc))
+    return path
+
+
+def test_candidate_that_records_a_skipped_gate_says_so_in_the_title(tmp_path):
+    clip = ps.make_clip(_deep_candidate(tmp_path, "skipped"))
+    assert "START GATE SKIPPED" in clip.title
+    assert clip.candidate.start_gate == "skipped" and clip.candidate.gate_fail
+    assert any("START GATE SKIPPED" in line for line in clip.subtitle_for([clip.build()]))
+
+
+def test_candidate_that_fails_the_gate_without_recording_a_skip_is_not_approvable(tmp_path):
+    for gate in (None, "passed"):
+        clip = ps.make_clip(_deep_candidate(tmp_path, gate))
+        assert "NOT APPROVABLE" in clip.title and "REVIEW FOR APPROVAL" not in clip.title
+        assert "START GATE SKIPPED" not in clip.title
+        assert any("start gate" in line for line in clip.subtitle_for([clip.build()]))
+
+
+def test_the_store_the_render_reads_with_refuses_those_files_by_default(tmp_path):
+    from puppy_sim.clips.playground_common import stage_store
+
+    store, ch = stage_store(), chain()
+    for gate in ("skipped", None):
+        with pytest.raises(store.StageStoreError) as e:
+            store.load(_deep_candidate(tmp_path, gate), urdf_text(), stage_pose(), ch)
+        assert e.value.code == "bad_stage_path"
+
+
+def test_an_ordinary_candidate_records_passed_and_has_no_skip_in_the_title(tmp_path):
+    clip = ps.make_clip(_candidate_file(tmp_path))
+    assert clip.candidate.start_gate == "passed" and "START GATE" not in clip.title

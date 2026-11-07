@@ -150,7 +150,8 @@ def check(q, urdf_text, ignore_gate=False, write_candidate=None, floor_cap_m=0.0
         return 3, out, None
     if write_candidate:
         method, points = found
-        stage_store.save(write_candidate, points, urdf_text, stage_q, method=method, person_floor_cap_m=floor_cap_m)
+        stage_store.save(write_candidate, points, urdf_text, stage_q, method=method, person_floor_cap_m=floor_cap_m,
+                         start_gate="skipped" if (ignore_gate and not gate_ok) else "passed")
         with open(write_candidate, "rb") as f:
             sha = hashlib.sha256(f.read()).hexdigest()
         out.append(f"WROTE {write_candidate} (method {method})")

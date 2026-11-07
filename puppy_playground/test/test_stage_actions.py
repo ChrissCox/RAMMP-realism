@@ -60,7 +60,7 @@ def env(tmp_path):
     yield from _env(tmp_path)
 
 
-def _env(tmp_path, floor_cap=None):
+def _env(tmp_path, floor_cap=None, accept_skipped=None):
     """The engine + FakeDriver + client. `floor_cap`: playground.stage_floor_cap_m (None = not set at all)."""
     rclpy.init()
     fake = FakeDriver()
@@ -74,6 +74,8 @@ def _env(tmp_path, floor_cap=None):
     ]
     if floor_cap is not None:
         overrides.append(Parameter("playground.stage_floor_cap_m", value=float(floor_cap)))
+    if accept_skipped is not None:
+        overrides.append(Parameter("playground.accept_skipped_start_gate", value=bool(accept_skipped)))
     engine = PuppyPlayground(parameter_overrides=overrides)
     executor = MultiThreadedExecutor()
     for node in (fake, client_node, engine):

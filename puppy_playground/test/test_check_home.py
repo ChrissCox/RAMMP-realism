@@ -113,3 +113,14 @@ def test_floor_cap_accepts_only_zero_or_the_attended_value(check_home, urdf_text
         assert e.value.code == 2
     rc = check_home.main(["--q", json.dumps(list(USERS_POSE)), "--urdf", str(urdf), "--floor-cap", "0.02"])
     assert rc == 0 and "ATTENDED FLOOR CAP 20 mm" in capsys.readouterr().out
+
+
+def test_ignore_start_gate_writes_skipped_and_the_ordinary_candidate_writes_passed(check_home, urdf_text, tmp_path):
+    a = tmp_path / "a.json"
+    code, lines, _ = check_home.check(INSIDE_OCCUPANT, urdf_text, ignore_gate=True, write_candidate=str(a))
+    if code == 0:  # a planner passed from the deep start
+        assert json.loads(a.read_text())["start_gate"] == "skipped"
+    b = tmp_path / "b.json"
+    code, lines, _ = check_home.check(REST_Q, urdf_text, write_candidate=str(b))
+    assert code == 0, "\n".join(lines)
+    assert json.loads(b.read_text())["start_gate"] == "passed"

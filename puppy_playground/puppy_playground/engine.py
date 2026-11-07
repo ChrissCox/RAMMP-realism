@@ -35,10 +35,9 @@ from . import motion, pipeline, stage_store
 STILL_RAD_S = 0.02  # every |dq| must be below this to start a move
 AT_TOL_RAD = 0.02  # "at" a path sample
 MOVED_RAD = 1e-3  # recover: the reading may change this little between the check and the send
-# plan_stage start gate, on the MARGIN_M-grown scene (every stage-path floor is relative to the first
-# sample, so a start that is already deep in a box would make them meaningless)
-START_PERSON_MIN_M = {"upper_arm": -0.010, "forearm": 0.010, "wrist": 0.010, "head": 0.010}
-START_OBSTACLE_MIN_M = 0.010
+# plan_stage start gate (defined in stage_store, which load re-checks it with)
+START_PERSON_MIN_M = stage_store.START_PERSON_MIN_M
+START_OBSTACLE_MIN_M = stage_store.START_OBSTACLE_MIN_M
 RECOVER_STAGE_RAD = 0.10  # recover: this close to the stage pose, min-jerk to it
 STAGE_PATH = "/data/stage_path.json"
 CANDIDATE_PATH = "/data/stage_path.candidate.json"
@@ -102,6 +101,16 @@ class PuppyPlayground(CapabilityEngine):
             self.get_logger().info("floor cap off")
         else:
             self.get_logger().error(f"stage_floor_cap_m {self.stage_floor_cap_m!r} is invalid: every action will refuse (bad_config)")
+
+        # true: replay a stage path whose first sample fails the start gate, or that records the gate as
+        # skipped (check_home --ignore-start-gate); the attended operator's call. Read-only, default false.
+        self.accept_skipped_start_gate = self.declare_parameter(
+            "playground.accept_skipped_start_gate", False, read_only
+        ).value is True
+        if self.accept_skipped_start_gate:
+            self.get_logger().warning(
+                "accept_skipped_start_gate is ON: a stage path that fails (or skipped) the start gate will replay."
+            )
 
         self._checked = {}  # (path sha256, chair-scene commit, urdf sha256) -> violations
         self._chains = {}  # urdf sha256 -> Chain
@@ -203,27 +212,15 @@ class PuppyPlayground(CapabilityEngine):
         """Why q cannot be a plan_stage start (None when it can): outside the URDF limits or the joint
         guards, or too close to the occupant boxes or an obstacle (START_PERSON_MIN_M,
         START_OBSTACLE_MIN_M, on the grown scene)."""
-        lo, hi = chain.pos_limits[:, 0], chain.pos_limits[:, 1]
-        if np.any(q < lo) or np.any(q > hi):
-            j = int(np.argmax(np.maximum(lo - q, q - hi)))
-            return f"joint {j + 1} is outside its URDF range"
-        over = np.abs(q) - stage_rules.guard_limits(chain)
-        if np.any(over > 1e-9):
-            return f"joint {int(np.argmax(over)) + 1} is past its guard"
-        person, obstacle = cls._clearances(chain, q, stage_store.MARGIN_M)
-        if not (np.all(np.isfinite(person)) and np.all(np.isfinite(obstacle))):
-            return "the clearance is not finite"
-        for i, part in enumerate(PARTS):
-            if person[i] < START_PERSON_MIN_M[part]:
-                return f"the {part} is {person[i] * 1000:.0f} mm from the chair occupant (needs {START_PERSON_MIN_M[part] * 1000:.0f} mm)"
-            if obstacle[i] < START_OBSTACLE_MIN_M:
-                return f"the {part} is {obstacle[i] * 1000:.0f} mm from an obstacle (needs {START_OBSTACLE_MIN_M * 1000:.0f} mm)"
-        return None
+        return stage_store.bad_start(chain, q)
 
     def _load(self, path, urdf_text, chain, stage_q):
         """The StagePath in `path`, re-checked once per engine start (cached by file hash)."""
         try:
-            sp = stage_store.load(path, urdf_text, stage_q, chain, floor_cap_m=self.stage_floor_cap_m)
+            sp = stage_store.load(
+                path, urdf_text, stage_q, chain, floor_cap_m=self.stage_floor_cap_m,
+                accept_skipped_start_gate=self.accept_skipped_start_gate,
+            )
         except stage_store.StageStoreError as e:
             raise EngineError(e.code, str(e))
         key = (sp.file_sha256, CHAIR_LAYERS_COMMIT, stage_store.urdf_hash(urdf_text))

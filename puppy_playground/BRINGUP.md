@@ -121,6 +121,12 @@ A pose that passes can be planned with Plan stage in step 4, or its candidate wr
 sha256); then render and approve it as in step 5. `--ignore-start-gate` is the attended operator's call:
 it skips only the gate (and prints a loud line saying so); every path rule still applies.
 
+The override is the attended operator's call, and it does not outlive the session by default: the
+candidate records `start_gate: "skipped"`, and the engine re-checks the gate on every stored path's
+first sample. A file that fails the gate or records `skipped` is refused (`bad_stage_path`, the reason
+names the gate). A file planned with the override only replays when the engine is started with
+`accept_skipped_start_gate:=true` (a read-only launch argument, default false).
+
 ### Optional: the attended floor cap (off unless you turn it on)
 
 The normal stage-path rule is that no part (upper arm, forearm, wrist, head) may get closer to the
