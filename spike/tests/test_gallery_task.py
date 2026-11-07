@@ -19,7 +19,7 @@ LEGIBLE = {  # the expressions each clip is about (the counter camera is far: re
     "anticipation_pair": {"WIND UP", "FOLLOW THROUGH"},
     "lock_on_view": {"LOCK ON"},
     "lock_on_standoff": {"LOCK ON"},
-    "failure_pair": {"SORRY", "SHAKE IT OFF"},
+    "failure_pair": set(),  # a failure in a PRECISION phase plays nothing: the clip shows the robot staying still
     "replay_pair": {"EAGER", "PROUD"},
 }
 DEMO_S = 6.0
@@ -94,12 +94,12 @@ def test_lock_on_at_the_standoff_stops_mid_reach_and_says_it_needs_the_call_spli
     assert puppy.duration > view.duration  # the stop and the creep cost more than the stare at the view pose
 
 
-def test_failure_pair_plays_the_apology_the_director_fits_in_the_demo_budget(built, kin):
+def test_failure_pair_plays_nothing_because_the_failure_is_in_a_precise_phase(built, kin):
     plain, puppy = built["failure_pair"]
-    assert _order(puppy) == ["SORRY", "SHAKE IT OFF"]
-    assert 0.0 < puppy.duration - plain.duration <= DEMO_S
-    assert puppy.tier == "boundary"
-    assert "refused" in registry()["failure_pair"].subtitle
+    assert _order(puppy) == []  # no phase is invented: the last one reported is 'detect' (PRECISION)
+    assert puppy.duration == pytest.approx(plain.duration)
+    clip = registry()["failure_pair"]
+    assert "stays still" in clip.title and "refused" in clip.subtitle and "no sorry" in clip.subtitle
 
 
 def test_replay_pair_plays_the_demo_plan(built, kin):

@@ -143,10 +143,12 @@ def events_from_run(track, chain, lock_on="view", t0=None):
         out += [(t_split, d.AfterMove()), (t_split, d.BeforeMove(True))]
     if run.terminal is not None and run.terminal[0] - t0 <= track.duration:  # (not in a window that ends earlier)
         t_term = run.terminal[0] - t0
-        out.append((t_term, d.Phase(run.terminal[1], "")))  # the terminal state is the last phase ('done', 'aborted')
         if run.terminal[1] == "done":
+            out.append((t_term, d.Phase("done", "")))
             out.append((t_term, d.Succeeded()))
-        else:  # aborted / canceled: the goal failed where it stood; a retry is possible
+        else:  # aborted / canceled: the goal failed where it stood; a retry is possible. No phase is
+            # invented: no capability reports 'aborted', so the director judges the failure by the
+            # last phase the run did report (grab_container fails inside a PRECISION one: nothing plays)
             out.append((t_term, d.Failed(True)))
     # a phase that starts within PHASE_REACH samples after a stop ends was set before the move: the
     # capability reports it at the stop's end, so the BeforeMove that follows it is in a PRECISION phase

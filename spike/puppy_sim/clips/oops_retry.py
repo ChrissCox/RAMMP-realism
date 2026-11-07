@@ -13,10 +13,10 @@ container to the run's own raised pose (all PRECISION); it stops, holding.
 Puppy Mode, only in those stops, decided by puppy_motion's Director from the events the capability
 would report. Where it missed it stays stock still (above the brim nothing may move toward the
 container: a reaction there would cross the obstacle floor). Once it has backed off to the retry
-standoff (the zone table's 'aborted' phase, then a recoverable failure) it looks around for the container (search), droops with puppy eyes up toward the user (sorry) and
-shakes it off; at the retry standoff, the move that follows ends at a precise pose, so it leans in
-and stares (lock-on); after the raise a small proud, muted while holding. The reactions go past
-the 'demo' budget's 6 s (all of them are shown here: it is lifted for this preview); the subtitle
+standoff (a recoverable failure; the last phase the capability reported is 'grasp, closing', a
+PRECISION phase) it plays nothing for the failure: no search, no sorry, no shake-off. At the retry
+standoff, the move that follows ends at a precise pose, so it leans in and stares (lock-on); after the
+raise a small proud, muted while holding. The budget is lifted to 30 s for this preview; the subtitle
 states what each part adds.
 The camera follows the head like close_follow, a little further back and aimed lower, so the
 container stays in frame while the arm waits above it.
@@ -100,8 +100,8 @@ def functional(sc, kin):
 
 
 def build():
-    """Puppy Mode through the Director, as the capability would drive it: the miss is an aborted
-    phase and a recoverable failure, reported once the arm has backed off to the retry standoff (above
+    """Puppy Mode through the Director, as the capability would drive it: the miss is a recoverable
+    failure after the last phase reported ('grasp', 'closing', PRECISION), reported once the arm has backed off to the retry standoff (above
     the brim, where it missed, it stays stock still: the library does not know the container is
     there, and a droop would cross it); the retry's move ends at a precise pose; then the success."""
     from puppy_motion import director as pm
@@ -111,7 +111,7 @@ def build():
     standoff, missed, retry, done = replay._stage_runs(func)
     events = replay.sorted_events(
         [
-            (retry[0] * DT + EDGE_S, pm.Phase("aborted", "")),
+            (missed[0] * DT + EDGE_S, pm.Phase("grasp", "closing")),  # the last phase the capability reported
             (retry[0] * DT + EDGE_S, pm.Failed(True)),
             (retry[0] * DT + 2 * EDGE_S, pm.Phase("grasp", "opening")),
             (retry[1] * DT - EDGE_S, pm.BeforeMove(True)),
@@ -153,15 +153,14 @@ class OopsClip(Clip):
         miss, proud = added_s(puppy, MISS_PHASES), added_s(puppy, ("done",))
         return [
             self.subtitle,
-            f"plain {puppy.plain_duration:.1f} s  |  Puppy Mode {puppy.duration:.1f} s: the reactions to the miss add "
-            f"{miss:.1f} s (past the 'demo' budget's 6 s; all shown), the proud {proud:.1f} s",
+            f"plain {puppy.plain_duration:.1f} s  |  Puppy Mode {puppy.duration:.1f} s: lock-on before the retry +{miss:.1f} s, the proud +{proud:.1f} s",
         ]
 
 
 CLIP = OopsClip(
     name="oops_retry",
     title="Oops! Missed, and try again",
-    subtitle="Illustrative: the retry is the capability's choice; Puppy Mode only adds the reactions between moves.",
+    subtitle="Illustrative. After the miss (a precise moment) it stays still; then a lock-on before the retry, a proud after.",
     camera=CAMERA,
     build=build,
 )

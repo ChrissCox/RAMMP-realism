@@ -8,8 +8,9 @@ holds where it is"), a recoverable error, and the arm stayed where it was.
 Puppy Mode, through puppy_motion's Director (replay.direct_run, the 'demo' budget): the events the
 capability would report go to the director, which plays what fits: with the request before the
 window and the budget reserved for the ending, the curious tilt and the wind-up do not fit; on the
-failure (an aborted phase and a recoverable failure) it plays the sorry (a droop, puppy eyes up
-toward the user) and a short shake-off; the search does not fit.
+failure (a recoverable failure; no phase is invented, the last one the run reported is 'detect', a
+PRECISION phase) it plays nothing: the arm stays where it stopped, as the ruling says for a failure at
+a precise moment. The Puppy Mode side is the plain run.
 """
 
 from .. import replay
@@ -27,8 +28,8 @@ def build():
 
 CLIP = PairClip(
     name="failure_pair",
-    title="When it fails: sorry, shake it off",
-    subtitle="real run: its camera's two views of the container disagreed by over 1 cm, so it refused to grab",
+    title="When it fails at a precise moment: it stays still",
+    subtitle="real run: its two camera views disagreed by over 1 cm in a precise phase, so it refused to grab; Puppy Mode plays no sorry",
     camera="counter",
     build=build,
     mood="CALM",
