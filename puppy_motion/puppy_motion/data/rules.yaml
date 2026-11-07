@@ -26,10 +26,10 @@ grab_container: &moving_task
 button_press: *moving_task
 
 # box_opening runs in a subprocess: only the boundaries of the task get a beat, never a phase or a
-# move. All its phases are PRECISION (zones.yaml).
+# move. All its phases are PRECISION (zones.yaml). One proud after a success under every preset (no
+# attentive row: with the pre-task beat deferred, demo's budget would otherwise add a second beat).
 box_opening:
   - {event: TaskRequested, beat: eager, keep: 5}
   - {event: Succeeded, beat: proud, keep: 6}
-  - {event: Succeeded, beat: attentive, keep: 1}
   - {event: Failed, recoverable: true, beat: sorry, keep: 6}
   - {event: Failed, recoverable: true, beat: shake_off, keep: 4}

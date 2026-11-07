@@ -251,7 +251,7 @@ def test_box_opening_rows_and_zones():
 
     rows = [(r.event, r.beat, r.keep, r.recoverable) for r in load_rules()["box_opening"]]
     assert rows == [
-        ("TaskRequested", "eager", 5, None), ("Succeeded", "proud", 6, None), ("Succeeded", "attentive", 1, None),
+        ("TaskRequested", "eager", 5, None), ("Succeeded", "proud", 6, None),
         ("Failed", "sorry", 6, True), ("Failed", "shake_off", 4, True),
     ]
     for phase in ("locate", "look", "press", "grip", "carry", "release", "home"):
@@ -267,8 +267,7 @@ def test_box_opening_yields_only_boundary_beats(chain, scene, targets, home):
         assert d.on_event(BeforeMove(False), home, False) == []
         assert d.on_event(BeforeMove(True), home, False) == []
         assert d.on_event(AfterMove(), home, False) == []
-    names = [b.name for b in d.on_event(Succeeded(), home, False)]
-    assert names and set(names) <= {"proud", "attentive"} and names[0] == "proud"
+    assert [b.name for b in d.on_event(Succeeded(), home, False)] == ["proud"]
     f = make(chain, scene, targets, "box_opening")
     assert set(b.name for b in f.on_event(Failed(True), home, False)) <= {"sorry", "shake_off"}
     assert f.on_event(Failed(False), home, False) == []
@@ -287,3 +286,13 @@ def test_box_opening_aborted_home_gets_no_sorry_and_a_precision_phase_still_gets
     d = make(chain, scene, targets, "box_opening")
     d.on_event(Phase("release", "x"), home, False)
     assert [b.name for b in d.on_event(Succeeded(), home, False)][:1] == ["proud"]
+
+
+@pytest.mark.parametrize("preset", ["demo", "subtle"])
+def test_box_opening_success_is_a_single_proud_under_every_preset(chain, scene, targets, home, preset):
+    """The hook defers TaskRequested to the first move, which box_opening never makes: after a
+    success the only beat is one proud, whatever budget is left."""
+    d = make(chain, scene, targets, "box_opening", preset=preset)
+    for phase in ("locate", "look", "press", "grip", "carry", "release", "home"):
+        assert d.on_event(Phase(phase, "x"), home, False) == []
+    assert [b.name for b in d.on_event(Succeeded(), home, False)] == ["proud"]
