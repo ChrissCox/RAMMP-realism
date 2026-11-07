@@ -144,7 +144,8 @@ def run(engine, action_id, params, ctx, original):
 
     The TaskRequested beats are deferred: they play just before the task's first move through
     engine.arm, when its own checks have passed (a task that never moves through engine.arm, like
-    box_opening, never plays them). The Succeeded beats play after `original` returns; on a
+    box_opening, never plays them). The Succeeded beats play after `original` returns, only if the task made a move call through the
+    proxy arm or its payload reports `executed` True (a dry run moves nothing); on a
     recoverable EngineError, once the task has moved, the Failed(True) beats play and the same error is re-raised. Anything
     else propagates with no beats. The ending beats never change the task's result: a Cancelled,
     EStopped, ControlTaken or any other exception from them is logged and the payload is returned
@@ -166,6 +167,7 @@ def run(engine, action_id, params, ctx, original):
     player = Player(
         real_arm, ctx, director, chain, scene, capability=capability, held=held_source(engine), log=log
     )
+    log(f"puppy mode on: {capability}, preset {_param(engine, 'puppy.preset')}")
     player.defer(TaskRequested())
     engine.arm = PuppyArm(real_arm, player)
 
@@ -186,7 +188,10 @@ def run(engine, action_id, params, ctx, original):
         raise error
     finally:
         engine.arm = real_arm
-    ending(Succeeded())
+    if player.moved or (isinstance(payload, dict) and payload.get("executed") is True):
+        ending(Succeeded())
+    else:  # a dry run: nothing moved the arm, so nothing celebrates
+        log("puppy: no Succeeded beats: the task moved nothing and did not report executed")
     return payload
 
 

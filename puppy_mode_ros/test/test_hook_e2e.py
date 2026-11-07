@@ -44,7 +44,7 @@ def wait_until(condition, timeout_s=WAIT_S):
         time.sleep(0.01)
 
 
-def make_capability(fake, seen, fail_in=None, error=None, phases=PHASES, move_in=None, error_at_start=None):
+def make_capability(fake, seen, fail_in=None, error=None, phases=PHASES, move_in=None, error_at_start=None, executed=True):
     """A fresh scripted class per test. `seen` collects what the task saw. The task raises `error`
     when it reaches phase `fail_in` (after the move, if that is the phase `move_in`), and
     `error_at_start` before doing anything. With `move_in` it moves through self.arm (to where it
@@ -73,7 +73,7 @@ def make_capability(fake, seen, fail_in=None, error=None, phases=PHASES, move_in
                     seen["at_raise"] = count()
                     raise error
             seen["at_end"] = count()
-            return {"done": action_id}
+            return {"done": action_id, "executed": executed}
 
     return Capability
 
@@ -165,7 +165,7 @@ def test_box_opening_success_plays_boundary_beats_only(env):
     arm_before = engine.arm
     result = env.run(engine).result
     assert result.status == Result.STATUS_SUCCESS
-    assert json.loads(result.payload_json) == {"done": "run"}
+    assert json.loads(result.payload_json) == {"done": "run", "executed": True}
     assert seen["arm_type"] == "PuppyArm" and seen["ctx_type"] == "PuppyCtx"
     assert engine.arm is arm_before  # restored
 
@@ -175,6 +175,17 @@ def test_box_opening_success_plays_boundary_beats_only(env):
     assert len(goals(env)) == 1
     assert sum(duration_s(g) for g in goals(env)) <= SUBTLE_BUDGET_S + 1e-6
     assert all(math.isfinite(p) for g in goals(env) for p in g.trajectory.points[-1].positions)
+    assert any(l.startswith("puppy: sending proud") for l in env.logs)  # the beat sent is logged
+
+
+def test_a_dry_run_that_moved_nothing_gets_no_beats(env):
+    seen = {}
+    engine = env.make(make_capability(env.fake, seen, executed=False), **on())
+    result = env.run(engine).result
+    assert result.status == Result.STATUS_SUCCESS
+    assert json.loads(result.payload_json) == {"done": "run", "executed": False}
+    assert len(goals(env)) == 0
+    assert any("no Succeeded beats" in l for l in env.logs)
 
 
 def test_recoverable_failure_in_a_precision_phase_gets_no_beat_and_the_same_error(env):
@@ -354,7 +365,7 @@ def test_a_cancel_estop_or_takeover_during_the_proud_leaves_the_success(env, mon
     engine = env.make(make_capability(env.fake, seen), **on())
     result = env.run(engine).result
     assert result.status == Result.STATUS_SUCCESS
-    assert json.loads(result.payload_json) == {"done": "run"}
+    assert json.loads(result.payload_json) == {"done": "run", "executed": True}
     assert type(engine.arm).__name__ != "PuppyArm"
 
 

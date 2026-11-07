@@ -26,7 +26,7 @@ from rosidl_runtime_py.convert import message_to_ordereddict
 from puppy_mode_ros.player import Player
 from puppy_mode_ros.proxies import PuppyArm, PuppyCtx
 from puppy_motion.beat import Beat, to_points
-from puppy_motion.director import AfterMove, BeforeMove, Failed, Phase
+from puppy_motion.director import AfterMove, BeforeMove, Failed, Phase, Succeeded
 from puppy_motion.geometry import Box, Scene
 from puppy_motion.track import DT, Zone
 from puppy_motion.urdf import Chain
@@ -672,3 +672,53 @@ def test_a_beat_that_meets_an_estop_leaves_the_task_call_its_own_contract(env):
     time.sleep(SETTLE_S)
     assert puppy.go_to_joint_config(START) is False  # as on the bare arm, not an EStopped
     assert player.disabled
+
+
+def test_a_sent_beat_is_logged_with_its_name_duration_zone_mode_and_start_offset(env):
+    player, _ = env.build()
+    player.play([make_beat()])
+    assert len(goals(env)) == 1
+    line = next(l for l in env.logs if l.startswith("puppy: sending nod"))
+    assert "1.60 s" in line and "FREE" in line and str(IMPEDANCE) in line
+    assert "mrad" in line
+
+
+def test_the_directors_dropped_beats_reach_the_log_once(env):
+    director = StubDirector()
+    director.log = []
+
+    def answer(event):
+        director.log.append(f"{type(event).__name__}: dropped (does not fit 0.50 s)")
+        return []
+
+    director.beats = answer
+    player, _ = env.build(director)
+    player.emit(AfterMove())
+    player.emit(AfterMove())
+    lines = [l for l in env.logs if "dropped (does not fit" in l]
+    assert len(lines) == 2 and all(l.startswith("puppy: director: ") for l in lines)
+
+
+def test_an_ending_waits_for_the_arm_to_settle_then_plays(env):
+    player, _ = env.build(StubDirector([make_beat()]))
+    player.emit(Succeeded())
+    assert len(goals(env)) == 1
+
+
+def test_an_ending_is_skipped_and_logged_when_the_arm_never_settles(env):
+    player, _ = env.build(StubDirector([make_beat()]), real_arm=Arm(env.arm, moving))
+    started = time.monotonic()
+    player.emit(Failed(True))
+    assert time.monotonic() - started < 2.0
+    assert not goals(env) and not player.disabled
+    assert any("did not settle" in l and "Failed" in l for l in env.logs)
+
+
+def test_the_action_client_is_warmed_at_the_first_event(env):
+    class NoServer(Arm):
+        def _wait_for_server(self, client, ctx, timeout_s):
+            return False
+
+    player, _ = env.build(real_arm=NoServer(env.arm, lambda js: js))
+    player.emit(Phase("home", ""))  # no beat yet: the check is already made
+    assert player.disabled and any("action server" in l for l in env.logs)

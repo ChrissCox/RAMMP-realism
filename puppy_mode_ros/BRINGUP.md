@@ -65,7 +65,7 @@ docker run --rm --name puppy-box-opening --network host --ipc host --user 1000:1
 ```
 
 It is foreground (Ctrl+C stops it cleanly; STOPSIGNAL is SIGINT). The log shows the node up and,
-if Puppy Mode could not engage, a line `puppy mode off: <reason>` (the run then goes on without
+if Puppy Mode could not engage for a goal (logged when the goal starts), a line `puppy mode off: <reason>` (the run then goes on without
 it). Then send the goal as usual (the `open_box` sheppy node, or your own `ros2 action send_goal`).
 
 Second run: the same command with `-p puppy.preset:=demo` (the same single proud after a success).
@@ -78,13 +78,22 @@ Only after the first run looked right.
   is not box opening's own is a failure: e-stop.
 - After a success: one proud beat at the end pose. It is tiny at the Flatbot rest pose (a few
   millimetres): an almost invisible proud is not a hook failure. After a failure: nothing.
+- The log also shows every beat sent (`puppy: sending <name> <s>, zone, mode/gains, start offset`),
+  the director's decisions and drops (`puppy: director: ...`, for example `nothing (holding
+  something near the person)`) and, at the start of each goal, `puppy mode on: <capability>, preset
+  ...`. No `sending` line after a success means the director chose nothing or a gate skipped it:
+  the lines say which. A gripper not fully open (> 0.05) at HOME counts as holding something near
+  the person: no proud. A goal that moved nothing and did not report `executed` (a dry run) gets no
+  success beats; the log says so. Before an ending beat the arm must settle (up to 1 s), else it is
+  skipped and logged.
 - Log lines starting `puppy:` say what was skipped and why (for example `skip <beat>: ...`);
   `puppy: ...; no more beats this action` means Puppy Mode switched itself off for that run and
   the run was unaffected.
 
 ## 4. Turn Puppy Mode off
 
-- One parameter: `-p puppy.enabled:=false` in the command above. The hook then runs the original
+- Live, without a restart: `ros2 param set /box_opening puppy.enabled false` (read at every goal).
+- Or at start: `-p puppy.enabled:=false` in the command above. The hook then runs the original
   `execute` unchanged (the mock check shows zero beats and the same result).
 - Or run the stock image with its own command, as sheppy does: restart `box_opening_v2` in the
   `sheppy` TUI.

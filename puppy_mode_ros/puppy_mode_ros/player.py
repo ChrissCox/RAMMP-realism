@@ -45,7 +45,7 @@ from rammp_arm import ERRORS
 
 from puppy_motion.beat import zone_at
 from puppy_motion.caps import DEFAULT_CAPS
-from puppy_motion.director import AfterMove, BeforeMove, Phase
+from puppy_motion.director import AfterMove, BeforeMove, Failed, Phase, Succeeded
 from puppy_motion.joints import align_turns, shortest_delta
 from puppy_motion.track import Zone
 from puppy_motion.validate import check_beat
@@ -88,6 +88,7 @@ class Player:
         self._pending_phase = None  # the latest Phase that arrived when the player could not take it
         self._deferred = None  # an event held until the task's first move (see defer)
         self.moved = False  # whether the task has made a move call through the proxy arm
+        self._director_logged = 0  # how many of the director's log lines are already forwarded
 
     # -- what the proxies report ---------------------------------------------------------------
 
@@ -154,7 +155,15 @@ class Player:
             if isinstance(event, Phase):  # replayed to the director at the next safe point
                 self._pending_phase = event
             return
-        if isinstance(event, AfterMove) and self._could_fire(event):
+        if not self._warm():  # the trajectory client exists (and its server is up) before any reading
+            return
+        if isinstance(event, (Succeeded, Failed)) and self._could_fire(event):
+            # the ending beats are composed at a settled posture, like AfterMove's; never settled: skipped
+            if not self._settle():
+                if not self.disabled:
+                    self.log(f"puppy: skip the {type(event).__name__} beats: the arm did not settle")
+                return
+        elif isinstance(event, AfterMove) and self._could_fire(event):
             self._settle()  # compose at the settled posture; if it never settles, the beat is skipped
             if self.disabled:
                 return
@@ -169,7 +178,19 @@ class Player:
         pending, self._pending_phase = self._pending_phase, None
         if pending is not None:  # keeps the director's phase (its PRECISION gate) current
             self.director.on_event(pending, q, held)
-        self.play(self.director.on_event(event, q, held))
+            self._forward_director_log()
+        beats = self.director.on_event(event, q, held)
+        self._forward_director_log()
+        self.play(beats)
+
+    def _forward_director_log(self):
+        """Copy the director's new log lines (drops and their reasons, zones) to the ROS log."""
+        lines = getattr(self.director, "log", None)
+        if not isinstance(lines, list):
+            return
+        for line in lines[self._director_logged:]:
+            self.log(f"puppy: director: {line}")
+        self._director_logged = len(lines)
 
     def _could_fire(self, event):
         """Whether a rule of the director's preset could answer `event` (True when unknown)."""
@@ -309,6 +330,11 @@ class Player:
         if not (float(np.abs(shortest_delta(self.chain, q, q2)).max()) <= START_TOL_RAD):
             self.log(f"puppy: skip {beat.name}: the arm moved while the beat was checked")
             return False
+        shown = gains if gains is None or isinstance(gains, str) else "custom"
+        self.log(
+            f"puppy: sending {beat.name} {beat.duration:.2f} s, zone {zone.name}, {mode}/{shown}, "
+            f"start offset {gap * 1000:.2f} mrad"
+        )
         sent = self._send(beat, points, mode, gains)
         if sent:
             self._settle()  # the task gets the arm back at rest; if not, the next beat is skipped

@@ -22,7 +22,7 @@ URDF="${1:-}"
 IMAGE="${IMAGE:-box_opening:v2-105f74e-puppy}"
 NAME="${NAME:-puppy-box-opening-mock}"
 case "$NAME" in puppy-box-opening-mock*) ;; *) echo "SETUP FAIL: NAME must start with puppy-box-opening-mock (got $NAME)" >&2; exit 99 ;; esac
-# a pose that passes check_beat against the flatbot chair scene: the playground's tested park
+# a pose that passes check_beat against the flatbot chair scene: box_opening's HOME
 REST_Q='[0.067, -1.8971, -3.137, -2.2691, -0.211, -0.6831, 1.725]'
 FAILS=0
 TMP=""

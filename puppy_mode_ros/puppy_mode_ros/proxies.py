@@ -11,6 +11,9 @@ move_joints / move_cartesian `impedance=` (a dict means IMPEDANCE with those gai
 POSITION). `stream()` marks a stream open until its block exits, and no beat plays meanwhile.
 Every other attribute is the real arm's.
 
+The TaskRequested beat is deferred (Player.defer): it plays just before the first move call, so a
+task that refuses a goal before moving, or never moves through the arm, plays none.
+
 Neither proxy changes what a call returns or raises, or the arguments it forwards. A move that
 fails (False, a non-zero driver code, any exception) disables the player and emits no AfterMove.
 """

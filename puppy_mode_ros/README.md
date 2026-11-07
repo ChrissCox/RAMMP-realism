@@ -68,7 +68,7 @@ with the task's own control mode and gains (box_opening: impedance "default").
 Fail-safes: if the gripper state is missing, stale, not present or NaN the container counts as held
 and beats near the person are muted; a failed task move, a refused or aborted beat, an unreadable
 state, or no trajectory action server within 2 s disables Puppy Mode for the rest of that action,
-and the task goes on. An e-stop, a takeover or a cancel meeting a beat before the task or during it
+and the task goes on. An e-stop, a takeover or a cancel meeting a beat before the task's first move or during it
 ends the action as it would without Puppy Mode; one meeting an ending beat leaves the task's result.
 
 Rules for running it on the real arm:
