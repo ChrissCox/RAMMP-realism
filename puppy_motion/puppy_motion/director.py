@@ -20,11 +20,17 @@ arm must stay settled for the grasp or the press). Failed(False) gets nothing.
 
 Settle time. Under joint impedance a held container makes the arm spring and settle slowly, so a
 beat that ends just before a PRECISION move must leave it still for longer: while the arm holds
-something, a beat's still tail (the hold after its last motion) is at least SETTLE_S for the task's
-control mode and gains (soft 2.3 s, medium/default 1.1 s, stiff 0.1 s), else the usual (TAIL_S) tail. The
-tail is never shorter than TAIL_S. The mode and gains are the task's last move call's
-(set_control); an impedance mode with gains this table does not know, or a mode it does not know,
-gets the longest. Position mode, or not holding, keeps the tail as before.
+something, the still tail (the hold after its last motion) of a beat played after a move (AfterMove) is at least SETTLE_S for
+the task's control mode and gains (soft 2.3 s, medium/default 1.1 s, stiff 0.1 s), else the usual
+(TAIL_S) tail; the tail is never shorter than TAIL_S. Only an AfterMove beat is followed by a
+possible PRECISION move: beats before a move (TaskRequested, BeforeMove: the move itself lets the
+arm settle) and the ending reactions (Succeeded, Failed: nothing follows) always keep TAIL_S.
+The mode and gains are those of the task's LAST move call (set_control is called after each move,
+so a beat sees the previous move's control: the settle concerns the move after the beat, which in
+practice runs in the same mode; the deferred TaskRequested beat plays before any move, with the
+constructor's control). Impedance with gains None means the arm's session default profile
+(medium, 1.1 s); a custom gains dict, a gains name this table does not know, or a mode it does not
+know, gets the longest. Position mode, or not holding, keeps the tail as before.
 """
 
 from collections import OrderedDict
@@ -329,8 +335,11 @@ class Director:
                 mode = mode.strip().lower()
             if not isinstance(mode, bool) and mode in POSITION_MODES:
                 return USUAL_SETTLE_S
-            if not isinstance(mode, bool) and mode in IMPEDANCE_MODES and isinstance(gains, str):
-                return SETTLE_S.get(gains.strip().lower(), LONGEST_SETTLE_S)
+            if not isinstance(mode, bool) and mode in IMPEDANCE_MODES:
+                if gains is None:  # the arm uses its session default profile (medium)
+                    return SETTLE_S["default"]
+                if isinstance(gains, str):
+                    return SETTLE_S.get(gains.strip().lower(), LONGEST_SETTLE_S)
         except Exception:  # unhashable or odd values
             pass
         return LONGEST_SETTLE_S
@@ -413,7 +422,7 @@ class Director:
             self.log.append(f"{tag}: dropped (no budget left after the reserve)")
             return None
         for short in (False, True):
-            beat = self._beat(rule.beat, short, q_now, held, zone, tag)
+            beat = self._beat(rule.beat, short, q_now, held, zone, tag, event_name != "AfterMove" or rule.ending is not None)
             if beat is not None and beat.duration <= left + EPS:
                 self.log.append(f"{tag}: {'short' if short else 'full'} {beat.duration:.2f} s ({left:.2f} s free)")
                 return beat
@@ -441,14 +450,16 @@ class Director:
         return mid + max(endings.values(), default=0.0)
 
     def _short_s(self, rule, q_now, held, zone):
+        """Seconds of rule's short beat with the usual tail (a reserve is the least that must stay
+        affordable; a later mid-task beat's settle is paid from what is left then)."""
         if held and rule.beat in NOT_WHEN_HELD:
             return 0.0
-        beat = self._beat(rule.beat, True, q_now, held, zone, None)
+        beat = self._beat(rule.beat, True, q_now, held, zone, None, True)  # the least a reserve must keep: the usual tail
         return 0.0 if beat is None else beat.duration
 
-    def _beat(self, name, short, q_now, held, zone, tag):
+    def _beat(self, name, short, q_now, held, zone, tag, usual_tail=False):
         """The composed, validated beat (cached), or None (why: in the log when `tag` is given)."""
-        tail_s = max(TAIL_S, self.settle_s(held))
+        tail_s = TAIL_S if usual_tail else max(TAIL_S, self.settle_s(held))
         key = (id(self.chain), id(self.scene), _target_key(self.targets), name, short, held, int(zone),
                self.caps, q_now.tobytes(), self.seed, tail_s)
         hit = _CACHE.get(key)

@@ -306,11 +306,11 @@ def _still_tail_s(beat):
 
 
 def _first_beat(d, q, held):
-    for event in (TaskRequested(), BeforeMove(False), Succeeded()):
-        beats = d.on_event(event, q, held)
-        if beats:
-            return beats[0]
-    raise AssertionError("no beat")
+    """The beat the director would build after a move (AfterMove: curious), whatever the budget
+    would let it play: the budget is tested separately."""
+    beat = d._beat("curious", False, q, held, Zone.FREE, None, False)
+    assert beat is not None, d.log
+    return beat
 
 
 @pytest.mark.parametrize(
@@ -321,7 +321,7 @@ def _first_beat(d, q, held):
         ((1, "medium"), 1.1),
         ((1, "stiff"), 0.1),
         (("impedance", "soft"), 2.3),
-        ((1, None), 2.3),  # gains not known: the longest
+        ((1, None), 1.1),  # no gains given: the arm's session default (medium)
         ((1, {"kq": [80.0] * 7, "zeta": 0.5}), 2.3),  # custom gains: the longest
         ((7, "stiff"), 2.3),  # a mode it does not know: the longest
         (("position", None), 0.0),
@@ -350,3 +350,46 @@ def test_set_control_changes_the_next_beat_and_is_default_safe(chain, scene, tar
     assert d.settle_s(True) == 2.3 and d.settle_s(False) == 0.0
     d.set_control(object(), [])  # unhashable or odd values never raise: the longest
     assert d.settle_s(True) == 2.3
+
+
+@pytest.mark.parametrize("gains", ["soft", "default", None])
+def test_ending_reactions_keep_the_usual_tail_so_subtle_still_plays_proud_held(chain, scene, targets, home, gains):
+    d = make(chain, scene, targets, preset="subtle", control=(1, gains))
+    beats = d.on_event(Succeeded(), home, True)
+    assert [b.name for b in beats] == ["proud"]
+    ref = make(chain, scene, targets, preset="subtle").on_event(Succeeded(), home, True)
+    assert abs(beats[0].duration - ref[0].duration) < 1e-9
+
+
+def test_a_held_soft_arm_in_demo_still_keeps_eager(chain, scene, targets, home):
+    d = make(chain, scene, targets, preset="demo", control=(1, "soft"))
+    names = [b.name for e in (TaskRequested(), BeforeMove(False), AfterMove()) for b in d.on_event(e, home, True)]
+    names += [b.name for b in d.on_event(Succeeded(), home, True)]
+    assert "eager" in names and "proud" in names, (names, d.log)
+    assert d.spent_s <= d.budget_s + 1e-9
+
+
+def test_beats_before_a_move_keep_the_usual_tail(chain, scene, targets, home):
+    for event in (TaskRequested(), BeforeMove(False)):
+        soft = make(chain, scene, targets, seed=3, control=(1, "soft")).on_event(event, home, True)
+        usual = make(chain, scene, targets, seed=3).on_event(event, home, True)
+        assert [b.name for b in soft] == [b.name for b in usual]
+        assert all(abs(a.duration - u.duration) < 1e-9 for a, u in zip(soft, usual))
+
+
+def test_only_after_move_beats_ask_for_the_settle_tail(chain, scene, targets, home):
+    d = make(chain, scene, targets, control=(1, "soft"))
+    asked = {}
+    real = d._beat
+
+    def spy(name, short, q, held, zone, tag, usual_tail=False):
+        if tag:
+            asked[tag.split()[0]] = usual_tail
+        return real(name, short, q, held, zone, tag, usual_tail)
+
+    d._beat = spy
+    for e in (TaskRequested(), Phase("view", ""), BeforeMove(False), AfterMove(), Succeeded()):
+        d.on_event(e, home, True)
+    assert asked.get("TaskRequested") and asked.get("Succeeded")
+    assert asked.get("BeforeMove", True)
+    assert asked["AfterMove"] is False
