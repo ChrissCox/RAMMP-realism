@@ -1,7 +1,7 @@
 """Read-only home-pose checker: can the Puppy Playground plan the stage path from this pose?
 
     python3 check_home.py [--q "[7 joint angles in rad]"] [--urdf /data/flatbot.urdf]
-                          [--write-candidate] [--ignore-start-gate]
+                          [--write-candidate] [--ignore-start-gate] [--floor-cap 0.02]
 
 Without --q it takes one /joint_states reading (a read-only subscription). It prints the pose, the
 plan_stage start gate exactly as the engine computes it, then every offline planner the engine
@@ -10,6 +10,10 @@ needs the live planner and is not tried here: Plan stage may still find a cuRobo
 Nothing moves. Exit 0: the gate passes and a planner passes. 2: the gate fails. 3: no planner passes.
 --write-candidate saves /data/stage_path.candidate.json (as plan_stage does) when a planner passes.
 --ignore-start-gate skips only the gate (an attended operator's call); every path rule still applies.
+--floor-cap 0.02 (only 0.0, the default, or 0.02) checks with the ATTENDED floor cap: each part's person
+floor is min(its first sample, 20 mm). For attended tests with NOBODY in the chair. The output names the
+rule used, and --write-candidate records the cap in the file (which then only replays under
+stage_floor_cap_m:=0.02).
 """
 
 import argparse
@@ -26,7 +30,7 @@ from puppy_motion.joints import shortest_delta
 from puppy_motion.urdf import Chain
 from puppy_playground import stage_store
 from puppy_playground.engine import (
-    CANDIDATE_PATH, START_OBSTACLE_MIN_M, START_PERSON_MIN_M, STILL_RAD_S, PuppyPlayground,
+    ATTENDED_FLOOR_CAP_M, CANDIDATE_PATH, START_OBSTACLE_MIN_M, START_PERSON_MIN_M, STILL_RAD_S, PuppyPlayground,
 )
 
 PLANNERS = ("min_jerk", "escape", "via")  # curobo needs the live planner
@@ -34,8 +38,9 @@ JOINT_NAMES = [f"arm_joint_{i}" for i in range(1, 8)]
 READ_TIMEOUT_S = 10.0
 DEFAULT_URDF = "/data/flatbot.urdf"
 
-# _candidate_points and _path_violations use `self` only to reach _via_points
-_ENGINE = SimpleNamespace(_via_points=PuppyPlayground._via_points)
+# _candidate_points and _path_violations use `self` only to reach _via_points and the floor cap
+def _engine(floor_cap_m=0.0):
+    return SimpleNamespace(_via_points=PuppyPlayground._via_points, stage_floor_cap_m=floor_cap_m)
 
 
 def read_joint_states():
@@ -78,9 +83,13 @@ def _pose_lines(q):
     ]
 
 
-def check(q, urdf_text, ignore_gate=False, write_candidate=None):
+def check(q, urdf_text, ignore_gate=False, write_candidate=None, floor_cap_m=0.0):
     """Returns (exit_code, lines, found) where found is (method, points) or None. Moves nothing.
-    `write_candidate`: a path to save the first passing planner's path to (stage_store.save)."""
+    `write_candidate`: a path to save the first passing planner's path to (stage_store.save).
+    `floor_cap_m`: 0.0 (each part's person floor is its first sample) or ATTENDED_FLOOR_CAP_M."""
+    if floor_cap_m not in (0.0, ATTENDED_FLOOR_CAP_M):
+        raise ValueError(f"floor_cap_m must be 0.0 or {ATTENDED_FLOOR_CAP_M}, not {floor_cap_m!r}")
+    engine = _engine(floor_cap_m)
     q = np.asarray(q, dtype=float)
     chain = Chain.from_urdf(urdf_text)
     stage_q = PuppyPlayground._stage_q(chain)
@@ -106,18 +115,23 @@ def check(q, urdf_text, ignore_gate=False, write_candidate=None):
 
     target = q + shortest_delta(chain, q, stage_q)  # the stage pose on the turn nearest the pose
     out.append("")
+    if floor_cap_m:
+        out.append(f"*** ATTENDED FLOOR CAP {floor_cap_m * 1000:.0f} mm: person floor = min(first sample, {floor_cap_m * 1000:.0f} mm) per part; "
+                   "for attended tests with NOBODY in the chair ***")
+    else:
+        out.append("person floor rule: each part may not fall below its first sample (no floor cap)")
     out.append("offline planners (cuRobo needs the live planner and is not tried here; Plan stage may still find a cuRobo route):")
     found = None
     for method in PLANNERS:
         try:
-            points = PuppyPlayground._candidate_points(_ENGINE, method, chain, q, target, {}, None)
+            points = PuppyPlayground._candidate_points(engine, method, chain, q, target, {}, None)
         except ValueError as e:
             out.append(f"  {method:9s} {type(e).__name__}: {e}")
             continue
         if points is None:
             out.append(f"  {method:9s} no plan")
             continue
-        bad = [f"{v.rule}: {v.detail}" for v in PuppyPlayground._path_violations(_ENGINE, points, chain, stage_store.MARGIN_M)]
+        bad = [f"{v.rule}: {v.detail}" for v in PuppyPlayground._path_violations(engine, points, chain, stage_store.MARGIN_M)]
         if not bad:
             stub = stage_store.StagePath(points, points[0][1], target, "", 0.0, "")
             try:
@@ -136,7 +150,7 @@ def check(q, urdf_text, ignore_gate=False, write_candidate=None):
         return 3, out, None
     if write_candidate:
         method, points = found
-        stage_store.save(write_candidate, points, urdf_text, stage_q, method=method)
+        stage_store.save(write_candidate, points, urdf_text, stage_q, method=method, person_floor_cap_m=floor_cap_m)
         with open(write_candidate, "rb") as f:
             sha = hashlib.sha256(f.read()).hexdigest()
         out.append(f"WROTE {write_candidate} (method {method})")
@@ -150,6 +164,8 @@ def main(argv=None):
     ap.add_argument("--urdf", default=DEFAULT_URDF)
     ap.add_argument("--write-candidate", action="store_true", help=f"save {CANDIDATE_PATH} when a planner passes")
     ap.add_argument("--ignore-start-gate", action="store_true", help="skip only the start-clearance gate (attended operator's call)")
+    ap.add_argument("--floor-cap", type=float, default=0.0, choices=(0.0, ATTENDED_FLOOR_CAP_M),
+                    help="0.0 (default, off) or 0.02: the ATTENDED person-floor cap, nobody in the chair")
     args = ap.parse_args(argv)
     if args.q is not None:
         try:
@@ -163,7 +179,8 @@ def main(argv=None):
     with open(args.urdf, encoding="utf-8") as f:
         urdf_text = f.read()
     code, lines, _ = check(q, urdf_text, ignore_gate=args.ignore_start_gate,
-                           write_candidate=CANDIDATE_PATH if args.write_candidate else None)
+                           write_candidate=CANDIDATE_PATH if args.write_candidate else None,
+                           floor_cap_m=args.floor_cap)
     print("\n".join(lines))
     return code
 

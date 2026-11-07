@@ -75,3 +75,41 @@ def test_main_exit_codes_and_no_candidate_on_a_gate_failure(check_home, tmp_path
     urdf.write_text(FLATBOT_URDF.read_text())
     rc = check_home.main(["--q", json.dumps(list(INSIDE_OCCUPANT)), "--urdf", str(urdf)])
     assert rc == 2 and "FAIL" in capsys.readouterr().out
+
+
+USERS_POSE = np.array([0.0531, 0.1366, -3.1161, -2.3040, -0.6222, 1.3713, 1.7233])  # upper arm 44 mm from the box
+
+
+def test_floor_cap_off_is_the_default_and_the_users_pose_has_no_planner(check_home, urdf_text):
+    code, lines, found = check_home.check(USERS_POSE, urdf_text)
+    text = "\n".join(lines)
+    assert code == 3 and found is None
+    assert "no floor cap" in text and "ATTENDED FLOOR CAP" not in text and "path_person_floor" in text
+
+
+def test_floor_cap_passes_the_users_pose_says_so_and_records_the_cap(check_home, urdf_text, tmp_path):
+    dest = tmp_path / "stage_path.candidate.json"
+    code, lines, found = check_home.check(USERS_POSE, urdf_text, write_candidate=str(dest), floor_cap_m=0.02)
+    text = "\n".join(lines)
+    assert code == 0 and found[0] == "min_jerk", text
+    assert "ATTENDED FLOOR CAP 20 mm" in text and "NOBODY" in text
+    assert json.loads(dest.read_text())["person_floor_cap_m"] == 0.02
+    chain = Chain.from_urdf(urdf_text)
+    stage_q = np.array(json.loads(
+        resources.files("puppy_playground").joinpath("data/stage_pose.json").read_text(encoding="utf-8"))["q"])
+    assert stage_store.load(str(dest), urdf_text, stage_q, chain, floor_cap_m=0.02).person_floor_cap_m == 0.02
+    with pytest.raises(stage_store.StageStoreError):
+        stage_store.load(str(dest), urdf_text, stage_q, chain)
+
+
+def test_floor_cap_accepts_only_zero_or_the_attended_value(check_home, urdf_text, tmp_path, capsys):
+    with pytest.raises(ValueError):
+        check_home.check(REST_Q, urdf_text, floor_cap_m=0.03)
+    urdf = tmp_path / "flatbot.urdf"
+    urdf.write_text(FLATBOT_URDF.read_text())
+    for bad in ("0.03", "0.05", "-0.02", "nan"):
+        with pytest.raises(SystemExit) as e:
+            check_home.main(["--q", json.dumps(list(REST_Q)), "--urdf", str(urdf), "--floor-cap", bad])
+        assert e.value.code == 2
+    rc = check_home.main(["--q", json.dumps(list(USERS_POSE)), "--urdf", str(urdf), "--floor-cap", "0.02"])
+    assert rc == 0 and "ATTENDED FLOOR CAP 20 mm" in capsys.readouterr().out

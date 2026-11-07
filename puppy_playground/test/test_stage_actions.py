@@ -57,6 +57,11 @@ def path_points(urdf_text, stage_q):
 
 @pytest.fixture
 def env(tmp_path):
+    yield from _env(tmp_path)
+
+
+def _env(tmp_path, floor_cap=None):
+    """The engine + FakeDriver + client. `floor_cap`: playground.stage_floor_cap_m (None = not set at all)."""
     rclpy.init()
     fake = FakeDriver()
     client_node = Node("playground_actions_client")
@@ -67,6 +72,8 @@ def env(tmp_path):
         Parameter("playground.candidate_path", value=str(cand_file)),
         Parameter("playground.log", value=str(tmp_path / "playground.jsonl")),
     ]
+    if floor_cap is not None:
+        overrides.append(Parameter("playground.stage_floor_cap_m", value=float(floor_cap)))
     engine = PuppyPlayground(parameter_overrides=overrides)
     executor = MultiThreadedExecutor()
     for node in (fake, client_node, engine):

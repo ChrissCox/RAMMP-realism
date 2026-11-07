@@ -43,6 +43,9 @@ STAGE_PATH = "/data/stage_path.json"
 CANDIDATE_PATH = "/data/stage_path.candidate.json"
 LOG_PATH = "/data/playground.jsonl"
 BLEND_S = 1.0  # stage / rest: the stored path is blended onto the reading over this long
+# The only non-zero value `stage_floor_cap_m` may take (attended tests with nobody in the chair): every
+# part's person-clearance floor on a stage path is min(its first sample, this) instead of its first sample.
+ATTENDED_FLOOR_CAP_M = stage_store.ATTENDED_FLOOR_CAP_M  # 0.020
 
 _SIZE = {"type": "number", "minimum": 0.25, "maximum": 1.0, "default": 0.25}
 
@@ -85,7 +88,8 @@ class PuppyPlayground(CapabilityEngine):
         self.log_path = self.declare_parameter("playground.log", LOG_PATH).value
         # a plan-only instance (the plan_stage run on the live ROS domain) refuses every other action
         self.plan_only = bool(self.declare_parameter("plan_only", False).value)
-
+        # 0.0 (off, the default) or ATTENDED_FLOOR_CAP_M; any other value refuses every action (execute)
+        self.stage_floor_cap_m = float(self.declare_parameter("playground.stage_floor_cap_m", 0.0).value)
 
         self._checked = {}  # (path sha256, chair-scene commit, urdf sha256) -> violations
         self._chains = {}  # urdf sha256 -> Chain
@@ -152,7 +156,16 @@ class PuppyPlayground(CapabilityEngine):
     def _path_violations(self, points, chain, margin, person_floor_ref=None, obstacle_floor_ref=None):
         """The stage-path rules on `points` against the chair scene grown by `margin` metres.
         `person_floor_ref`: see puppy_motion.stage.path_violations (default: the first sample).
-        `obstacle_floor_ref`: likewise for the obstacle clearances."""
+        `obstacle_floor_ref`: likewise for the obstacle clearances.
+        With `stage_floor_cap_m` on, a missing `person_floor_ref` is min(the first sample's person
+        clearances, the cap); off, nothing changes."""
+        cap = getattr(self, "stage_floor_cap_m", 0.0)
+        if cap and person_floor_ref is None:
+            try:
+                first = PuppyPlayground._clearances(chain, points[0][1], margin)[0]
+                person_floor_ref = np.minimum(first, cap)
+            except Exception:  # noqa: BLE001 -- a malformed path: path_violations reports it
+                person_floor_ref = None
         return stage_rules.path_violations(
             points, chain, grown_scene(chair_scene(), margin),
             person_floor_ref=person_floor_ref, obstacle_floor_ref=obstacle_floor_ref,
@@ -198,7 +211,7 @@ class PuppyPlayground(CapabilityEngine):
     def _load(self, path, urdf_text, chain, stage_q):
         """The StagePath in `path`, re-checked once per engine start (cached by file hash)."""
         try:
-            sp = stage_store.load(path, urdf_text, stage_q, chain)
+            sp = stage_store.load(path, urdf_text, stage_q, chain, floor_cap_m=self.stage_floor_cap_m)
         except stage_store.StageStoreError as e:
             raise EngineError(e.code, str(e))
         key = (sp.file_sha256, CHAIR_LAYERS_COMMIT, stage_store.urdf_hash(urdf_text))
@@ -250,6 +263,8 @@ class PuppyPlayground(CapabilityEngine):
             p_now, o_now = self._clearances(chain, q, stage_store.MARGIN_M)
             p_start, o_start = self._clearances(chain, points[0][1], stage_store.MARGIN_M)
             ref, oref = np.minimum(p_now, p_start), np.minimum(o_now, o_start)
+            if self.stage_floor_cap_m:
+                ref = np.minimum(ref, self.stage_floor_cap_m)
             rec["person_floor_ref"] = [float(x) for x in ref]
             rec["obstacle_floor_ref"] = [float(x) for x in oref]
             bad = self._path_violations(
@@ -291,6 +306,11 @@ class PuppyPlayground(CapabilityEngine):
             raise EngineError("not_yet", f"{action_id} is not implemented yet")
         rec = {"t": time.time(), "action": action_id, "params": params}
         try:
+            if self.stage_floor_cap_m not in (0.0, ATTENDED_FLOOR_CAP_M):  # a NaN is in neither
+                why = (f"playground.stage_floor_cap_m is {self.stage_floor_cap_m!r}; it must be exactly 0.0 (off) "
+                       f"or {ATTENDED_FLOOR_CAP_M} (attended floor cap)")
+                self.get_logger().error(why)
+                raise EngineError("bad_config", why)
             if self.plan_only and action_id != "plan_stage":
                 raise EngineError("plan_only", "this instance is plan-only", recoverable=True)
             out = handler(ctx, rec)
@@ -365,7 +385,10 @@ class PuppyPlayground(CapabilityEngine):
             raise EngineError("no_candidate", f"no planner produced a passing stage path ({why})", recoverable=True)
         else:
             method, points = found
-            stage_store.save(self.candidate_path, points, urdf_text, stage_q, method=method)
+            stage_store.save(
+                self.candidate_path, points, urdf_text, stage_q, method=method,
+                person_floor_cap_m=self.stage_floor_cap_m,
+            )
             out = {"violations": [], "candidate": self.candidate_path, "method": method}
         rec["tried"] = tried
         rec["result"] = out
@@ -386,13 +409,13 @@ class PuppyPlayground(CapabilityEngine):
             seconds = max(2.0, float(np.abs(target - q).max()) / 0.2)
             return stage_rules.retime_path(stage_rules.min_jerk_path(q, target, seconds), chain)
         if method == "via":
-            return self._via_points(chain, q, target, ctx)
+            return self._via_points(chain, q, target, ctx, self.stage_floor_cap_m)
         return escape_path(chain, chair_scene(), q, target)
 
     VIA_TRIES = 600
 
     @staticmethod
-    def _via_points(chain, q, target, ctx=None):
+    def _via_points(chain, q, target, ctx=None, floor_cap_m=0.0):
         """Two straight joint-space legs q -> w -> target through a seeded random waypoint w, for starts
         (a parked arm) where neither the straight line nor escape_path passes. A waypoint is kept only
         if both legs, sampled finely, keep the person floor, the 0.35 m rule and the obstacle floor
@@ -411,7 +434,8 @@ class PuppyPlayground(CapabilityEngine):
                 continue
             c = clearances_batch(chain, scene, qs, False)
             person, obstacle = c[:, 0, :], c[:, 1, :]
-            if np.isnan(c).any() or np.any(person < person[0] - 1e-9):
+            floor = person[0] if not floor_cap_m else np.minimum(person[0], floor_cap_m)
+            if np.isnan(c).any() or np.any(person < floor - 1e-9):
                 continue
             f = person[:, far]
             reached = np.maximum.accumulate(f >= stage_rules.PERSON_STAGE_M, axis=0)

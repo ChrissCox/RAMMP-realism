@@ -207,7 +207,7 @@ def _anchors(engine, urdf_text, chain, stage_q):
     """The poses auto may start a beat from: the stage pose and, with an approved stage path, its rest."""
     anchors = [np.asarray(stage_q, dtype=float)]
     try:
-        anchors.append(stage_store.load(engine.stage_path, urdf_text, stage_q, chain).q_rest)
+        anchors.append(stage_store.load(engine.stage_path, urdf_text, stage_q, chain, floor_cap_m=engine.stage_floor_cap_m).q_rest)
     except Exception:  # noqa: BLE001 -- no usable stored path: the stage pose alone
         pass
     return anchors

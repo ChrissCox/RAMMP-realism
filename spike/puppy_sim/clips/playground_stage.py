@@ -82,6 +82,9 @@ def build(candidate=None):
     return track
 
 
+CAP_NOTE = "ATTENDED FLOOR CAP 20 mm (nobody in the chair)"
+
+
 def candidate_title(c):
     if c.error:
         return "Stage path candidate: UNREADABLE - NOT APPROVABLE"
@@ -96,6 +99,8 @@ def candidate_subtitle(c):
         verdict = "no stage-path violations (grown by the engine's margin)"
     else:
         verdict = f"NOT APPROVABLE: {len(c.violations)} violation(s), first {c.violations[0][:50]}"
+    if c.floor_cap_m:
+        verdict = f"{CAP_NOTE}: {verdict}"
     return [f"the candidate file itself, forward then back; {LEGEND}", verdict]
 
 

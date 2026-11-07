@@ -160,7 +160,9 @@ def test_launch_file_declares_the_arguments():
     spec.loader.exec_module(module)
     description = module.generate_launch_description()
     names = {e.name for e in description.entities if type(e).__name__ == "DeclareLaunchArgument"}
-    assert {"use_orchestrator", "mock", "plan_only", "mock_urdf", "mock_joints", "ui_port"} <= names
+    assert {"use_orchestrator", "mock", "plan_only", "mock_urdf", "mock_joints", "ui_port", "stage_floor_cap_m"} <= names
+    cap = next(e for e in description.entities if type(e).__name__ == "DeclareLaunchArgument" and e.name == "stage_floor_cap_m")
+    assert "".join(t.text for t in cap.default_value) == "0.0"  # the floor cap is off unless asked for
 
 
 def test_status_express_refusal_stage_express_stop_and_auto(stack, stage_q):

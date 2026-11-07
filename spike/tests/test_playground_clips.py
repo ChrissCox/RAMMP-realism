@@ -136,3 +136,57 @@ def test_unreadable_candidate_is_not_approvable(tmp_path):
     assert "NOT APPROVABLE" in clip.title
     with pytest.raises(ValueError):
         clip.build()
+
+
+USERS_POSE = [0.0531, 0.1366, -3.1161, -2.3040, -0.6222, 1.3713, 1.7233]  # upper arm 44 mm from the occupant box
+
+
+def _pose_candidate(tmp_path, cap, name="stage_path.candidate.json"):
+    """A min_jerk path from the user's pose to the stage pose, saved with person_floor_cap_m=cap."""
+    import numpy as np
+    from puppy_motion import stage
+    from puppy_motion.joints import shortest_delta
+    from puppy_sim.clips.playground_common import stage_store
+
+    ch, q0, q_stage = chain(), np.array(USERS_POSE), stage_pose()
+    target = q0 + shortest_delta(ch, q0, q_stage)
+    pts = stage.retime_path(stage.min_jerk_path(q0, target, max(2.0, float(np.abs(target - q0).max()) / 0.2)), ch)
+    path = tmp_path / name
+    stage_store().save(path, pts, urdf_text(), q_stage, method="min_jerk", person_floor_cap_m=cap)
+    return path
+
+
+def test_floor_cap_candidate_is_checked_with_the_cap_and_says_so(tmp_path):
+    clip = ps.make_clip(_pose_candidate(tmp_path, 0.02))
+    assert clip.candidate.floor_cap_m == 0.02 and clip.candidate.violations == []
+    assert "REVIEW FOR APPROVAL" in clip.title
+    assert any("ATTENDED FLOOR CAP 20 mm" in line for line in clip.subtitle_for([clip.build()]))
+
+
+def test_the_same_path_without_the_cap_is_not_approvable_and_does_not_say_cap(tmp_path):
+    clip = ps.make_clip(_pose_candidate(tmp_path, 0.0))
+    assert clip.candidate.floor_cap_m == 0.0 and clip.candidate.violations
+    assert "NOT APPROVABLE" in clip.title
+    assert not any("FLOOR CAP" in line for line in clip.subtitle_for([clip.build()]))
+
+
+def test_a_candidate_without_the_cap_key_reads_as_off(tmp_path):
+    import json
+
+    f = _pose_candidate(tmp_path, 0.0)
+    doc = json.loads(f.read_text())
+    del doc["person_floor_cap_m"]
+    f.write_text(json.dumps(doc))
+    assert ps.make_clip(f).candidate.floor_cap_m == 0.0
+
+
+def test_a_candidate_with_a_bad_cap_is_unreadable(tmp_path):
+    import json
+
+    f = _pose_candidate(tmp_path, 0.0)
+    for bad in (0.05, True, "0.02", None):
+        doc = json.loads(f.read_text())
+        doc["person_floor_cap_m"] = bad
+        f.write_text(json.dumps(doc))
+        clip = ps.make_clip(f)
+        assert clip.candidate.error and "NOT APPROVABLE" in clip.title, bad

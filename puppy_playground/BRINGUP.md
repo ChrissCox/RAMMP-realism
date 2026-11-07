@@ -121,6 +121,35 @@ A pose that passes can be planned with Plan stage in step 4, or its candidate wr
 sha256); then render and approve it as in step 5. `--ignore-start-gate` is the attended operator's call:
 it skips only the gate (and prints a loud line saying so); every path rule still applies.
 
+### Optional: the attended floor cap (off unless you turn it on)
+
+The normal stage-path rule is that no part (upper arm, forearm, wrist, head) may get closer to the
+occupant box than it was at the path's first sample. From poses near Kinova Home that blocks every
+planner: from [0.0531, 0.1366, -3.1161, -2.3040, -0.6222, 1.3713, 1.7233] rad the upper arm starts 44 mm
+from the box and every route passes it at about 28 mm. The floor cap relaxes only that one rule: each
+part's floor becomes `min(its first-sample clearance, 20 mm)`. The 0.35 m monotone rule, the obstacle
+floor, the speed caps and the ends are unchanged.
+
+**Use it only for attended tests with NOBODY in the chair.** It lets the arm pass within 20 mm of
+where an occupant would sit. It is for nothing else.
+
+To turn it on, give the same setting everywhere, or nothing works:
+
+- the plan-only run (step 4) and the real run (step 6): add `stage_floor_cap_m:=0.02` to the
+  `ros2 launch puppy_playground playground.launch.py ...` command, for example
+  `ros2 launch puppy_playground playground.launch.py use_orchestrator:=false plan_only:=true stage_floor_cap_m:=0.02`;
+- the check above: add `--floor-cap 0.02` to `check_home.py` (and `--write-candidate` if you want the file).
+  The output says which rule it used (a loud `ATTENDED FLOOR CAP 20 mm` line, or `no floor cap`).
+
+Only 0.0 (off, the default) and 0.02 are accepted. Any other `stage_floor_cap_m` makes every action
+refuse with `bad_config` (the reason is in the log and in `/status`), before the arm is touched.
+
+The cap is written into the candidate file (`person_floor_cap_m`), and the engine refuses a stage path
+whose cap differs from its own (`bad_stage_path`): a file approved under the cap only replays with
+`stage_floor_cap_m:=0.02`, and a file planned without it only replays without. If you change the
+setting, plan and approve again. The simulator render (step 5) reads the cap from the file, checks with
+the same rule and says `ATTENDED FLOOR CAP 20 mm` in its subtitle.
+
 ## 4. Plan the stage path (no motion; `plan_only`)
 
 `plan_stage` needs the chair-only scene, so switch profiles first, and only then start the real

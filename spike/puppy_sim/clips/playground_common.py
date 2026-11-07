@@ -208,6 +208,7 @@ class Candidate:
     margin_m: float = 0.0
     violations: list = None
     error: str = ""
+    floor_cap_m: float = 0.0  # the attended floor cap the file records (0.0 = off)
     sha256: str = ""  # of the file's bytes, to compare with `sha256sum` before it is copied
 
     @property
@@ -226,12 +227,27 @@ def load_candidate(path):
         pass  # store.load reports the unreadable file below
     ch, sc = chain(), chair()
     try:
-        sp = store.load(path, urdf_text(), stage_pose(ch, sc), ch)
+        # the cap is the file's own: the render checks with the rule the file says it was approved under
+        # (stage_store.load itself refuses a malformed value or any cap but 0.0 and the attended one)
+        doc = json.loads(Path(path).read_bytes())
+        cap = doc.get("person_floor_cap_m", 0.0)
+        cap = float(cap) if isinstance(cap, (int, float)) and not isinstance(cap, bool) else 0.0
+    except (OSError, ValueError, AttributeError):
+        cap = 0.0  # store.load reports the unreadable file below
+    try:
+        sp = store.load(path, urdf_text(), stage_pose(ch, sc), ch, floor_cap_m=cap)
     except store.StageStoreError as e:
         cand.error = f"{e.code}: {e}"
         return cand
     cand.method, cand.points, cand.margin_m = sp.method or "unlabelled", sp.points, sp.margin_m
     cand.duration = float(sp.points[-1][0])
     grown = escape.grown_scene(sc, max(sp.margin_m, store.MARGIN_M))
-    cand.violations = [f"{v.rule}: {v.detail}" for v in stage.path_violations(sp.points, ch, grown)]
+    cand.floor_cap_m = sp.person_floor_cap_m
+    ref = None  # None = each part's first sample, exactly as the engine does with no cap
+    if cand.floor_cap_m:
+        from puppy_motion.geometry import clearances_batch
+
+        first = clearances_batch(ch, grown, np.asarray(sp.points[0][1], dtype=float)[None, :], False)[0][0]
+        ref = np.minimum(first, cand.floor_cap_m)
+    cand.violations = [f"{v.rule}: {v.detail}" for v in stage.path_violations(sp.points, ch, grown, person_floor_ref=ref)]
     return cand
