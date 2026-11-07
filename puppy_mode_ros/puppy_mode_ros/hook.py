@@ -164,11 +164,17 @@ def run(engine, action_id, params, ctx, original):
         return original(engine, action_id, params, ctx)
     capability, director, chain, scene = setup
     real_arm = engine.arm
-    player = Player(
-        real_arm, ctx, director, chain, scene, capability=capability, held=held_source(engine), log=log
-    )
-    log(f"puppy mode on: {capability}, preset {_param(engine, 'puppy.preset')}")
-    player.defer(TaskRequested())
+    try:  # Puppy Mode must never fail a goal that would otherwise run: any error here runs the task as it was
+        player = Player(
+            real_arm, ctx, director, chain, scene, capability=capability, held=held_source(engine), log=log
+        )
+        log(f"puppy mode on: {capability}, preset {director.preset}")
+        player.defer(TaskRequested())
+    except PASS:
+        raise
+    except Exception as error:  # noqa: BLE001
+        log(f"puppy mode off: {type(error).__name__}: {error}")
+        return original(engine, action_id, params, ctx)
     engine.arm = PuppyArm(real_arm, player)
 
     def ending(event):
