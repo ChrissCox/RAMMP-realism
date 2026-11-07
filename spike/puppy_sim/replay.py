@@ -34,8 +34,8 @@ PHASE_REACH = 3  # samples
 SPLIT_MARGIN = 3  # samples the split keeps clear of the final approach (besides its ramp)
 CONTAINER_TARGET = "container"
 STANDOFF_SUBTITLE = (
-    "needs grab_container to split its reach into two calls (view -> 10 cm short, then -> grasp): "
-    "a capability change"
+    "needs grab_container to split its reach into two calls (view -> about 11 cm short, then -> grasp): "
+    "a capability change; the creep's extra time is outside the beat budget"
 )
 RANK = {"TaskRequested": 0, "AfterMove": 1, "Phase": 2, "BeforeMove": 3, "Succeeded": 4, "Failed": 4}
 
@@ -95,11 +95,12 @@ def _entry_at(run, window_t0, t):
 
 
 def standoff_split(track, chain):
-    """(t_split, t_close): where a split approach would stop (the last free sample before the final
+    """(t_split, t_close), or None when the run has no approach to split: where a split approach would stop (the last free sample before the final
     approach, the tool a little over STANDOFF_M from the grasp pose) and where the gripper closes."""
-    run = _run_of(track)
-    approach = next(p for p in track.phases if p.name == "approach")
-    close = next(p for p in track.phases if p.name == "close")
+    approach = next((p for p in track.phases if p.name == "approach"), None)
+    close = next((p for p in track.phases if p.name == "close"), None)
+    if approach is None or close is None:
+        return None  # a run that never reached the approach has no split
     i0, i1 = int(round(approach.t0 / DT)), int(round(approach.t1 / DT))
     precise = np.flatnonzero(track.zone[i0 : i1 + 1] == PRECISION)
     first = i0 + (int(precise[0]) if precise.size else i1 - i0)
@@ -120,9 +121,10 @@ def events_from_run(track, chain, lock_on="view"):
     for ts, phase, msg in run.feedback:
         if t0 <= ts < t0 + track.duration:
             out.append((ts - t0, d.Phase(*_today(phase, msg))))
-    standoff = lock_on == "standoff"
+    split = standoff_split(track, chain) if lock_on == "standoff" else None
+    standoff = split is not None  # no approach to split: the view path
     if standoff:
-        t_split, _ = standoff_split(track, chain)
+        t_split, _ = split
     for i0, i1, before, after in _stage_runs(track):
         if before != "start":
             out.append((i0 * DT, d.AfterMove()))
@@ -139,17 +141,23 @@ def events_from_run(track, chain, lock_on="view"):
             out.append((t_term, d.Succeeded()))
         else:  # aborted / canceled: the goal failed where it stood; a retry is possible
             out.append((t_term, d.Failed(True)))
-    # a phase that starts within PHASE_REACH_S after a stop ends was set before the move: it comes first
+    # a phase that starts within PHASE_REACH samples after a stop ends was set before the move: the
+    # capability reports it at the stop's end, so the BeforeMove that follows it is in a PRECISION phase
     ends = [i1 for _, i1, _, after in _stage_runs(track) if after != "end"]
-
-    def key(e):
-        i = round(e[0] / DT)
-        if isinstance(e[1], d.Phase):
+    shifted = []
+    for t, ev in out:
+        i = round(t / DT)
+        if isinstance(ev, d.Phase):
             i = next((i1 for i1 in ends if i1 <= i <= i1 + PHASE_REACH), i)
-        return (i, RANK[type(e[1]).__name__])
-
-    out.sort(key=key)
-    return out
+        shifted.append((i, t, ev))
+    # the terminal status comes once the last move has returned: after every AfterMove
+    last_after = max((i for i, _, ev in shifted if isinstance(ev, d.AfterMove)), default=0)
+    terminal = (d.Succeeded, d.Failed)
+    t_end = max((i for i, _, ev in shifted if isinstance(ev, terminal)), default=None)
+    if t_end is not None:
+        shifted = [(max(i, last_after) if i >= t_end else i, t, ev) for i, t, ev in shifted]
+    shifted.sort(key=lambda e: (e[0], RANK[type(e[2]).__name__]))
+    return [(i * DT, ev) for i, _, ev in shifted]
 
 
 def _accel_cap(caps):
@@ -184,12 +192,16 @@ def direct_run(run_name, preset="demo", lock_on="view", caps="default", seed=0):
     from puppy_motion.behaviors import Targets
 
     targets = Targets(person_head=person.person_head(), container=scene.build().placement.center.copy())
-    director = d.Director(run.capability, chain, person, targets, preset, lock_on, caps, seed)
     accel = _accel_cap(caps)
-    standoff = lock_on == "standoff"
-    t_split = t_close = None
+    split = standoff_split(plain, chain) if lock_on == "standoff" else None
+    standoff = split is not None
+    notes = []
+    if lock_on == "standoff" and not standoff:
+        notes.append("lock_on='standoff': this run never reaches the approach, so there is no split; played as 'view'")
+        lock_on = "view"
+    director = d.Director(run.capability, chain, person, targets, preset, lock_on, caps, seed)
     if standoff:
-        t_split, t_close = standoff_split(plain, chain)
+        t_split, t_close = split
         i_split = int(round(t_split / DT))
 
     # group the events of one sample, decide each in order, and place one hold per group
@@ -251,6 +263,7 @@ def direct_run(run_name, preset="demo", lock_on="view", caps="default", seed=0):
     puppy.log = [
         f"time: plain {plain.duration:.1f} s -> {puppy.duration:.1f} s (+{puppy.duration - plain.duration:.1f} s of "
         f"the {d.BUDGETS[preset]:.1f} s '{preset}' budget)",
+        *notes,
         *director.log,
     ]
     return plain, puppy

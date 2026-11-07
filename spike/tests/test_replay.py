@@ -27,7 +27,7 @@ def test_events_follow_the_recording():
     plain = runs.functional_track(run, scene.MotionKin())
     events = replay.events_from_run(plain, scene.motion_chain(RUNS[0]))
     names = [type(e).__name__ for _, e in events]
-    assert names[0] == "TaskRequested" and names[-1] == "AfterMove" and "Succeeded" in names
+    assert names[0] == "TaskRequested" and names[-1] == "Succeeded"
     samples = [round(t / DT) for t, _ in events]
     assert samples == sorted(samples)
     phases = [(e.name, e.message) for _, e in events if type(e).__name__ == "Phase"]
@@ -121,3 +121,38 @@ def test_standoff_subtitle_names_the_capability_change():
 def test_replay_clips_pass_every_check(name):
     for clip, label, _, results, _ in checks.check_named(name):
         assert checks.passed(results), (label, [c for c in results if not c.ok])
+
+
+@pytest.mark.parametrize("run", RUNS)
+def test_events_are_monotone_and_the_terminal_status_comes_last(run):
+    plain = runs.functional_track(runs.load_run(run), scene.MotionKin())
+    events = replay.events_from_run(plain, scene.motion_chain(run))
+    times = [t for t, _ in events]
+    assert times == sorted(times)
+    names = [type(e).__name__ for _, e in events]
+    last_terminal = max(i for i, n in enumerate(names) if n in ("Succeeded", "Failed"))
+    assert "AfterMove" not in names[last_terminal:]
+    # a Phase is never ahead of the stop's BeforeMove it follows in time
+    for (t_a, a), (t_b, b) in zip(events, events[1:]):
+        assert not (isinstance(a, director.Phase) and isinstance(b, director.BeforeMove) and t_a > t_b)
+
+
+@pytest.mark.parametrize("preset", PRESETS)
+def test_standoff_on_a_run_without_an_approach_plays_the_view_path(preset):
+    plain, puppy = replay.direct_run(FAILED_RUN, preset, lock_on="standoff")
+    view = replay.direct_run(FAILED_RUN, preset)[1]
+    assert puppy.tier == "boundary" and np.array_equal(puppy.q, view.q)
+    assert any("no split" in line for line in puppy.log)
+    assert replay.standoff_split(plain, None) is None
+
+
+def test_the_camera_uses_the_kin_it_is_given():
+    class Kin:
+        def fk(self, q, site="ee"):
+            return np.array([1.0, 2.0, 3.0]), np.eye(3)
+
+    track = replay.timeline.constant_track(np.zeros(7), 0.0, 1.0)
+    from puppy_sim import render
+
+    look = render.CAMERAS["close"].lookats(track, Kin())
+    assert np.allclose(look[0], np.array([1.0, 2.0, 3.0]) + np.asarray(render.CAMERAS["close"].head_offset))

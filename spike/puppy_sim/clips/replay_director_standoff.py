@@ -4,6 +4,8 @@ robot cannot do this today: grab_container's reach is one driver call, so it wou
 in two. The 6 s budget is lifted so the stare is not crowded out by the earlier beats.
 """
 
+from dataclasses import replace
+
 from .. import replay, scene
 from . import PairClip
 
@@ -14,7 +16,9 @@ def build():
     keep = director.BUDGETS["demo"]
     director.BUDGETS["demo"] = 30.0
     try:
-        return replay.direct_run(scene.REFERENCE_RUN, "demo", lock_on="standoff")
+        plain, puppy = replay.direct_run(scene.REFERENCE_RUN, "demo", lock_on="standoff")
+        puppy.budget = replace(puppy.budget, name="demo (lifted for this preview)")
+        return plain, puppy
     finally:
         director.BUDGETS["demo"] = keep
 

@@ -106,7 +106,7 @@ class Camera:
             return np.tile(np.asarray(self.lookat, dtype=float), (track.n, 1))
         track = track.commanded if track.commanded is not None else track
         func = track.func if track.func is not None else track
-        kin = scene_mod.MotionKin()  # puppy_motion's chain gives the head; the MuJoCo kin is only the renderer
+        kin = kin if kin is not None else scene_mod.MotionKin()  # no kin given: puppy_motion's chain
         if self.follow_s is None:
             return np.tile(kin.fk(func.q[0], "ee")[0] + np.asarray(self.head_offset), (track.n, 1))
         head = gaussian_filter1d(kin.fk_track(func.q, "ee")[0], self.follow_s / DT, axis=0, mode="nearest")
