@@ -383,9 +383,10 @@ def test_stage_refuses_from_elsewhere_than_the_approved_start(env, urdf_text, st
 
 
 def test_plan_stage_from_a_start_in_collision_refuses_bad_start_and_writes_nothing(env, monkeypatch):
+    # the start gate lives in stage_store (the engine's _bad_start delegates to it)
     monkeypatch.setattr(
-        PuppyPlayground, "_clearances",
-        classmethod(lambda cls, chain, q, margin: (np.full(4, 0.2), np.array([-0.01, 0.2, 0.2, 0.2]))),
+        stage_store, "clearances",
+        lambda chain, q, margin: (np.full(4, 0.2), np.array([-0.01, 0.2, 0.2, 0.2])),
     )
     env.at(HOME)
     res = env.run("plan_stage")
