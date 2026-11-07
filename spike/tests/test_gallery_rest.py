@@ -1,15 +1,16 @@
 """The gallery clips at rest and at the start of a task (curious_tilt, doze_wake, eager_start;
-idle_alive is covered by test_clips): registered, they pass every check with nothing shrunk to fit,
-each expression moves the face on screen in its own camera, and each does what it says."""
+idle_alive is covered by test_clips), built on puppy_motion: registered, they pass every check with
+nothing shrunk to fit, each expression moves the face on screen in its own camera, and each does
+what it says."""
 
 import copy
 
 import numpy as np
 import pytest
 
-from puppy_sim import checks, layer, render, runs
-from puppy_sim.clips import PairClip, curious_tilt, eager_start, registry
-from puppy_sim.timeline import BOUNDARY, DT, PRECISION
+from puppy_sim import checks, lib, render, runs
+from puppy_sim.clips import PairClip, curious_tilt, registry
+from puppy_sim.timeline import BOUNDARY, DT, PRECISION, functional_of
 
 GALLERY = ("curious_tilt", "doze_wake", "eager_start")
 SHOWN_PX = 25.0  # the gallery's bar: an expression moves the eye or the mouth this far (1280x720)
@@ -58,32 +59,27 @@ def test_the_gallery_clips_are_registered():
 
 
 @pytest.mark.parametrize("name", GALLERY)
-def test_passes_every_check_with_nothing_shrunk(built, mkin, name):
-    for track in _tracks(built[name]):
-        failed = [(c.name, c.shown, c.detail) for c in checks.check_track(track, mkin) if not c.ok]
-        assert not failed, (name, failed)
+def test_passes_every_check_with_nothing_shrunk(built, name):
+    for clip, label, _, rows, log in checks.check_named(name):
+        failed = [(c.name, c.shown, c.detail) for c in rows if not c.ok]
+        assert not failed, (name, label, failed)
     log = _tracks(built[name])[-1].log
     assert not [line for line in log if "amplitude x" in line or "still over a cap" in line], log
 
 
 @pytest.mark.parametrize("name", GALLERY)
 def test_every_expression_shows_on_screen(built, mkin, name):
-    """Each chip's beat moves the eye or the mouth at least SHOWN_PX in the clip's own camera; the
-    recorded move in eager_start not at all."""
+    """Each chip's beat moves the eye or the mouth at least SHOWN_PX in the clip's own camera."""
     rows = render.legibility(_tracks(built[name])[-1], mkin, registry()[name].camera)
     assert rows
     for r in rows:
-        travel = max(r.eye_px, r.mouth_px)
-        if r.beat == eager_start.MOVE_CHIP:
-            assert travel == 0.0, r
-        else:
-            assert travel >= SHOWN_PX, r
+        assert max(r.eye_px, r.mouth_px) >= SHOWN_PX, r
 
 
 def test_curious_tilt_looks_tilts_both_ways_and_settles(sc, mkin):
-    rest, parts = curious_tilt.rest_and_parts(sc, mkin)
-    full = layer.compose(rest, copy.deepcopy(parts), mkin)
-    no_tilt = layer.compose(rest, [copy.deepcopy(p) for p in parts if p.name != "double tilt"], mkin)
+    rest, parts = curious_tilt.rest_and_parts()
+    full = lib.compose(rest, copy.deepcopy(parts))
+    no_tilt = lib.compose(rest, [copy.deepcopy(p) for p in parts if p.name != "double tilt"])
     assert {b.name for b in full.beats} == {"CURIOUS"}
     curious = _window(full, full.beats[0])
     eye, R = mkin.fk_track(full.q[curious], "eye")
@@ -120,18 +116,16 @@ def test_doze_wake_sleeps_low_then_wakes_stretches_and_nods(built, mkin, sc):
 def test_eager_start_plays_every_move_as_recorded(built, mkin, sc):
     plain, puppy = built["eager_start"]
     assert puppy.tier == BOUNDARY
-    tier = next(c for c in checks.check_track(puppy, mkin) if c.name == "tier")
-    assert tier.ok and tier.shown == "boundary"
     assert puppy.duration > plain.duration
     assert not np.any(plain.zone == PRECISION)  # the window keeps clear of the 10 ms locate phase
     order = [b.name for b in sorted(puppy.beats, key=lambda b: b.t0)]
-    assert order == ["TASK REQUESTED", "EAGER", "WIND UP", eager_start.MOVE_CHIP, "FOLLOW THROUGH"]
-    beats = {b.name: b for b in puppy.beats}
-    move = _window(puppy, beats[eager_start.MOVE_CHIP])
-    assert np.array_equal(puppy.q[move], puppy.func.q[move])  # the move itself: untouched
-    eager = _window(puppy, beats["EAGER"])
+    assert order == ["EAGER"]  # the demo budget: nothing else fits (see the clip's doc)
+    func = functional_of(puppy)
+    outside = ~_window(puppy, puppy.beats[0])
+    assert np.abs(puppy.q[outside] - func.q[outside]).max() < 1e-6  # everything but the beat: as recorded
+    eager = _window(puppy, puppy.beats[0])
     eyes, R = mkin.fk_track(puppy.q[eager], "eye")
-    func_eyes, func_R = mkin.fk_track(puppy.func.q[eager], "eye")
+    func_eyes, func_R = mkin.fk_track(func.q[eager], "eye")
     assert (eyes[:, 2] - func_eyes[:, 2]).max() > 0.015  # perked up
     to_user = _angle(R[:, :, 2], sc.person_head - eyes) - _angle(func_R[:, :, 2], sc.person_head - func_eyes)
     assert to_user.min() < -6.0  # turned toward the user

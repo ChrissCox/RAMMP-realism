@@ -5,26 +5,24 @@ camera looked for the container for 4.5 s, but its two views of it disagreed by 
 the capability refused to grab ("grab failed: frames disagree > 1 cm -- not grasping -- the arm
 holds where it is"), a recoverable error, and the arm stayed where it was.
 
-Puppy Mode: a curious tilt on arriving at the view pose, a stare at the container while the arm
-waits to look anyway (free: it adds no time there), stillness while the camera looks, then on the
-failure a puzzled look around the counter, a droop with a sheepish look up toward the user (puppy
-eyes), and a shake to shake it off. The eager perk and the fillers (wind-ups, follow-throughs) are
-left out here: with its defaults the director spends ~1.6 s on an eager perk before it can know the
-task will fail, and then the shake-off no longer fits the 6 s (it plays the perk, the tilt, the
-stare, the puzzled look and the sorry: +5.5 s).
+Puppy Mode, through puppy_motion's Director (replay.direct_run, the 'demo' budget): the events the
+capability would report go to the director, which plays what fits: with the request before the
+window and the budget reserved for the ending, the curious tilt and the wind-up do not fit; on the
+failure (an aborted phase and a recoverable failure) it plays the sorry (a droop, puppy eyes up
+toward the user) and a short shake-off; the search does not fit.
 """
 
-from .. import director, runs
+from .. import replay
 from . import PairClip
 
 FAILURE_RUN = "grab_container_20261028_191809"
 WINDOW_S = (5.4, 19.88)  # the plain task's seconds shown: from home, moving to the view pose, to the end
-SKIP = ("eager", "wind_up", "follow_through")
 
 
 def build():
-    plain, puppy = director.direct(runs.load_run(FAILURE_RUN), skip=SKIP)
-    return director.excerpt(plain, puppy, *WINDOW_S)
+    """The request came before the window: only the events inside it are reported."""
+    plain, puppy = replay.direct_run(FAILURE_RUN, "demo", window=WINDOW_S, drop=("TaskRequested",))
+    return plain, replay.display_names(puppy)
 
 
 CLIP = PairClip(

@@ -6,8 +6,7 @@ from . import Clip
 
 
 def build():
-    sc = scene.build()
-    return runs.functional_track(runs.load_run(scene.REFERENCE_RUN), sc.kin())
+    return runs.functional_track(runs.load_run(scene.REFERENCE_RUN), scene.MotionKin())
 
 
 CLIP = Clip(

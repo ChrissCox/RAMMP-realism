@@ -49,7 +49,7 @@ def _cap_check(name, value, cap, where):
 def check_track(track, kin):
     """All checks for a track; the expressive ones only for a composed (Puppy Mode) track."""
     out = _robot_checks(track, kin)
-    if track.func is not None:
+    if track.func is not None and track.spliced is None:  # (a replay has replay_checks)
         out += _expressive_checks(track, kin)
         out += _precision_checks(track)
         out += _path_checks(track)
@@ -207,7 +207,9 @@ def replay_checks(plain, puppy):
     of the path is the plain path at tau, and the beats' time is within the preset's budget."""
     from puppy_motion.validate import check_beat
 
-    chain, person = scene.motion_chain(plain.name), scene.person_scene()
+    from . import lib
+
+    chain, person = lib.env().chain, scene.person_scene()  # (the Chain of the reference robot, as every clip's)
     found = []
     for sp in puppy.spliced:
         b = sp.beat
@@ -284,16 +286,19 @@ def check_named(name):
     kin = scene.build(clip.run).kin()
     built = clip.build()
     tracks = built if isinstance(built, tuple) else (built,)
-    labels = ("plain", "puppy") if len(tracks) == 2 else ("puppy" if tracks[0].func is not None else "plain",)
+    single_puppy = tracks[0].func is not None or tracks[0].spliced is not None
+    labels = ("plain", "puppy") if len(tracks) == 2 else ("puppy" if single_puppy else "plain",)
     rows = []
     for label, t in zip(labels, tracks):
-        if t.spliced is not None:  # a puppy_motion replay: its own checks
-            rows.append((name, label, t.duration, [*check_track(t, kin), *replay_checks(tracks[0], t)], t.log))
-        elif t.commanded is None:
-            rows.append((name, label, t.duration, check_track(t, kin), t.log))
-        else:  # an achieved track (dynamics.achieved): the checks hold its command
+        if t.commanded is not None:  # an achieved track (dynamics.achieved): the checks hold its command
             cmd = t.commanded
-            rows.append((name, t.control, cmd.duration, [*check_track(cmd, kin), achieved_note(t, kin)], cmd.log))
+            more = replay_checks(cmd.source, cmd) if cmd.spliced is not None else []  # (a puppy_motion replay)
+            rows.append((name, t.control, cmd.duration, [*check_track(cmd, kin), *more, achieved_note(t, kin)], cmd.log))
+        elif t.spliced is not None:  # a puppy_motion replay: its own checks, against the plain track
+            plain = tracks[0] if len(tracks) == 2 else t.source
+            rows.append((name, label, t.duration, [*check_track(t, kin), *replay_checks(plain, t)], t.log))
+        else:
+            rows.append((name, label, t.duration, check_track(t, kin), t.log))
     return rows
 
 

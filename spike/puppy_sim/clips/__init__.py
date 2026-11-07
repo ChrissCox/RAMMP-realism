@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .. import behaviors, layer, runs, scene
+from .. import lib, runs
 from ..scene import REFERENCE_RUN
 from ..timeline import Label, constant_track
 
@@ -59,34 +59,33 @@ class PairClip(Clip):
 
 
 def labelled(chip, parts, t0):
-    """parts with the chip over [t0, their end] (chip None: they keep their own beats)."""
+    """parts with the chip over [t0, their end] (chip None: they keep their own labels)."""
     if chip is None:
         return parts
     end = max(p.span()[1] for p in parts if p.span())
     for p in parts:
-        p.beats = []
-    parts[0].beats = [Label(chip, t0, end)]
+        p.labels = []
+    parts[0].labels = [Label(chip, t0, end)]
     return parts
 
 
-def rest_reel(slots, q=None, gap_s=REEL_GAP_S, caps=layer.DEFAULT_CAPS, name="rest at home"):
+def rest_reel(slots, q=None, gap_s=REEL_GAP_S, caps="default", name="rest at home"):
     """A composed Track playing each (chip, play) of `slots` in turn at rest at joints q (default:
     home), gap_s apart, each chip naming its primitive over its span. play(ctx, t0) returns the
-    primitive's [Contribution] from t0 (chip None: they carry their own beats). Each is measured on
-    a long still track first, then composed once on the reel's own track."""
-    sc = scene.build()
-    kin = sc.kin()
+    primitive's [Contribution] (puppy_motion's) from t0 (chip None: they carry their own labels).
+    Each is measured on a long still track first, then composed once on the reel's own track."""
+    e = lib.env()
     q = np.array(runs.HOME_JOINTS) if q is None else np.asarray(q, dtype=float)
-    probe = behaviors.Context.of(constant_track(q, REST_GRIP, REEL_MEASURE_S), sc, kin, caps=caps)
+    probe = lib.context(constant_track(q, REST_GRIP, REEL_MEASURE_S), e, caps)
     plan, t = [], gap_s
     for chip, play in slots:
         plan.append((chip, play, t))
         t = max(p.span()[1] for p in play(probe, t) if p.span()) + gap_s
     rest = constant_track(q, REST_GRIP, t, name=name)
-    runs.mark_near_user(rest, kin)
-    ctx = behaviors.Context.of(rest, sc, kin, caps=caps)
+    runs.mark_near_user(rest, e.kin)
+    ctx = lib.context(rest, e, caps)
     parts = [c for chip, play, t0 in plan for c in labelled(chip, play(ctx, t0), t0)]
-    return layer.compose(rest, parts, kin, caps)
+    return lib.compose(rest, parts, e, caps)
 
 
 def registry():

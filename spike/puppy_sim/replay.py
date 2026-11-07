@@ -15,7 +15,8 @@ approach is marked PRECISION (a little outside 10 cm), never inside it. The cree
 runs the rest of the approach at 0.75 x speed.
 """
 
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -37,6 +38,11 @@ STANDOFF_SUBTITLE = (
     "needs grab_container to split its reach into two calls (view -> about 11 cm short, then -> grasp): "
     "a capability change; the creep's extra time is outside the beat budget"
 )
+DISPLAY = {  # the chip text of a beat in the gallery
+    "eager": "EAGER", "wind_up": "WIND UP", "follow_through": "FOLLOW THROUGH", "curious": "CURIOUS",
+    "lock_on": "LOCK ON", "proud": "PROUD", "attentive": "ATTENTIVE", "search": "SEARCH", "sorry": "SORRY",
+    "shake_off": "SHAKE IT OFF",
+}
 RANK = {"TaskRequested": 0, "AfterMove": 1, "Phase": 2, "BeforeMove": 3, "Succeeded": 4, "Failed": 4}
 
 
@@ -109,12 +115,13 @@ def standoff_split(track, chain):
     return i_split * DT, close.t0
 
 
-def events_from_run(track, chain, lock_on="view"):
+def events_from_run(track, chain, lock_on="view", t0=None):
     """[(t, Event)] in time order for the functional track of a recorded run: what grab_container
-    would have told its director. t is the track's functional time."""
+    would have told its director. t is the track's functional time; t0 is the run time of its first
+    sample (default: the start of the replay window)."""
     d = _pm()
     run = _run_of(track)
-    t0 = runs.replay_window(run)[0]
+    t0 = runs.replay_window(run)[0] if t0 is None else t0
     out = []
     if run.feedback:
         out.append((max(run.feedback[0][0] - t0, 0.0), d.TaskRequested()))
@@ -134,7 +141,7 @@ def events_from_run(track, chain, lock_on="view"):
             out.append((i1 * DT, d.BeforeMove(precise)))
     if standoff:
         out += [(t_split, d.AfterMove()), (t_split, d.BeforeMove(True))]
-    if run.terminal is not None:
+    if run.terminal is not None and run.terminal[0] - t0 <= track.duration:  # (not in a window that ends earlier)
         t_term = run.terminal[0] - t0
         out.append((t_term, d.Phase(run.terminal[1], "")))  # the terminal state is the last phase ('done', 'aborted')
         if run.terminal[1] == "done":
@@ -180,19 +187,27 @@ def _stand(track, idx):
     return int(starts[np.argmin(np.abs(track.tau[starts] - idx * DT))])
 
 
-def direct_run(run_name, preset="demo", lock_on="view", caps="default", seed=0):
+def _dropped(ev, drop):
+    """True when `ev` is named in drop: its class name, or 'BeforeMove(True)' / 'BeforeMove(False)'."""
+    name = type(ev).__name__
+    return name in drop or (name == "BeforeMove" and f"BeforeMove({ev.precise_end})" in drop)
+
+
+def direct_run(run_name, preset="demo", lock_on="view", caps="default", seed=0, window=None, drop=()):
     """(plain, puppy) for a recorded run: its functional track, and the track the puppy_motion
-    Director makes of it (each returned beat is a time-warp hold of its length at its event)."""
+    Director makes of it (each returned beat is a time-warp hold of its length at its event).
+    window: (t0, t1) seconds of the replay window to show (default: all of it); drop: names of event
+    classes (or 'BeforeMove(False)') the capability is not asked to report (a preview showing one kind of beat)."""
     d = _pm()
     chain = scene.motion_chain(run_name)
     person = scene.person_scene()
     run = runs.load_run(run_name)
     kin = scene.MotionKin(chain, person)
-    plain = runs.functional_track(run, kin)
+    start = runs.replay_window(run)[0]
+    plain = runs.functional_track(run, kin, None if window is None else (start + window[0], start + window[1]))
     from puppy_motion.behaviors import Targets
 
     targets = Targets(person_head=person.person_head(), container=scene.build().placement.center.copy())
-    accel = _accel_cap(caps)
     split = standoff_split(plain, chain) if lock_on == "standoff" else None
     standoff = split is not None
     notes = []
@@ -200,13 +215,76 @@ def direct_run(run_name, preset="demo", lock_on="view", caps="default", seed=0):
         notes.append("lock_on='standoff': this run never reaches the approach, so there is no split; played as 'view'")
         lock_on = "view"
     director = d.Director(run.capability, chain, person, targets, preset, lock_on, caps, seed)
+    events = events_from_run(plain, chain, lock_on, start + (0.0 if window is None else window[0]))
+    events = [(t, ev) for t, ev in events if not _dropped(ev, drop)]
+    puppy = play_events(plain, events, director, split, caps, preset, notes)
+    puppy.name = plain.name
+    return plain, puppy
+
+
+def stop_events(track, precise_before=()):
+    """[(t, Event)] for the stops of a scripted track, as a capability's moves would report them:
+    AfterMove at the start of each stop the arm arrives in, BeforeMove at the end of each stop it
+    leaves (precise_end for the stops listed in `precise_before`: seconds near the stop's end, the
+    move that follows ends at a precise pose), sorted as events_from_run's."""
+    d = _pm()
+    out = []
+    for i0, i1, before, after in _stage_runs(track):
+        if before != "start":
+            out.append((i0 * DT, d.AfterMove()))
+        if after != "end":
+            precise = any(abs(t - i1 * DT) < 0.5 for t in precise_before)
+            # a stop followed by PRECISION takes its hold a little earlier: the hold eases around it
+            out.append(((i1 - (HOLD_EDGE if after == "precision" else 0)) * DT, d.BeforeMove(precise)))
+    return out
+
+
+def sorted_events(events):
+    """events in time order, simultaneous ones in RANK order."""
+    return sorted(events, key=lambda e: (round(e[0] / DT), RANK[type(e[1]).__name__]))
+
+
+def direct_scripted(plain, events, tasks=(("grab_container", 0.0),), preset="demo", caps="default", seed=0,
+                    targets=None, budget_s=None, e=None):
+    """The puppy track of a scripted (not recorded) task: `plain` is its preview Track, `events` the
+    [(t, Event)] its capability would report, in time order. tasks: [(capability, t_from)], one
+    Director each from its time on (consecutive tasks); budget_s lifts each one's time budget (the
+    track's budget is then the sum). Same director, holds and checks as a recorded run (play_events);
+    `targets` default to the preview scene's (the person, the container)."""
+    from . import lib
+
+    e = e or lib.env()
+    d = _pm()
+    directors = [(t, d.Director(cap, e.chain, e.person, targets or e.targets, preset, "view", caps, seed)) for cap, t in tasks]
+    each = d.BUDGETS[preset] if budget_s is None else budget_s
+    for _, dr in directors:
+        dr.budget_s = each
+    puppy = play_events(plain, events, directors, None, caps, preset, [], budget_s=each * len(tasks))
+    if budget_s is not None:
+        puppy.budget = timeline.Budget(f"{preset} (lifted to {budget_s:.0f} s for this preview)", each * len(tasks))
+    elif len(tasks) > 1:
+        puppy.budget = timeline.Budget(f"{preset} x{len(tasks)} tasks", each * len(tasks))
+    puppy.name = plain.name
+    return puppy
+
+
+def play_events(plain, events, director, split, caps, preset, notes, budget_s=None):
+    """The puppy track: `events` fed to `director`, each beat it returns spliced in as a hold at its
+    event (the standoff `split`, (t_split, t_close), makes the hold there a creep). `director` may be
+    a list of (t_from, Director): consecutive tasks, each decided by its own director from its time on;
+    budget_s is then their budgets' sum (default: the preset's, for one task)."""
+    d = _pm()
+    directors = director if isinstance(director, list) else [(0.0, director)]
+    budget_s = d.BUDGETS[preset] if budget_s is None else budget_s
+    accel = _accel_cap(caps)
+    standoff = split is not None
     if standoff:
         t_split, t_close = split
         i_split = int(round(t_split / DT))
 
     # group the events of one sample, decide each in order, and place one hold per group
     groups, last_end = [], -1
-    for t, ev in events_from_run(plain, chain, lock_on):
+    for t, ev in events:
         idx = min(max(int(round(t / DT)), 0), plain.n - 2)
         if groups and idx == groups[-1][0]:
             groups[-1][1].append(ev)
@@ -224,6 +302,7 @@ def direct_run(run_name, preset="demo", lock_on="view", caps="default", seed=0):
         if idx >= plain.n - 1:
             break
         q_now, held = plain.q[idx].copy(), bool(plain.held[idx])
+        director = [dr for t_from, dr in directors if t_from <= idx * DT + 1e-9][-1]
         got = [(type(ev).__name__, b) for ev in evs for b in director.on_event(ev, q_now, held)]
         if got and (_touches_precision(plain, idx, half + 1) or np.abs(q_now - plain.q[stay]).max() > STOPPED_RAD):
             director.log.append(f"{[n for n, _ in got]} dropped at {idx * DT:.2f} s: the arm is not stopped clear of PRECISION")
@@ -243,6 +322,8 @@ def direct_run(run_name, preset="demo", lock_on="view", caps="default", seed=0):
     warped = timeline.warp(plain, holds, slows)
     puppy = warped
     puppy.q = warped.q.copy()
+    puppy.func = replace(warped, q=warped.q.copy())  # the plain path on the output clock, as a composed track has
+    puppy.gain = (warped.zone != PRECISION).astype(float)
     puppy.spliced, puppy.beats = [], []
     for idx, got, q_now, held, at_split in placed:
         a = _stand(puppy, idx)
@@ -256,14 +337,43 @@ def direct_run(run_name, preset="demo", lock_on="view", caps="default", seed=0):
             puppy.spliced.append(Spliced(beat, ev_name, a, q_now, held))
             puppy.beats.append(Label(beat.name, a * DT, (a + n - 1) * DT))
             a += n - 1
-    puppy.name = plain.name
     puppy.caps = caps
-    puppy.budget = Budget(preset, d.BUDGETS[preset])
+    puppy.budget = Budget(preset, budget_s)
     puppy.tier = "standoff" if standoff else "boundary"
     puppy.log = [
         f"time: plain {plain.duration:.1f} s -> {puppy.duration:.1f} s (+{puppy.duration - plain.duration:.1f} s of "
-        f"the {d.BUDGETS[preset]:.1f} s '{preset}' budget)",
+        f"the {budget_s:.1f} s '{preset}' budget)",
         *notes,
-        *director.log,
+        *[line for _, dr in directors for line in dr.log],
     ]
-    return plain, puppy
+    return puppy
+
+
+def display_names(track):
+    """The track with its beats named for the gallery's chips (DISPLAY); returns the track."""
+    track.beats = [Label(DISPLAY.get(b.name, b.name), b.t0, b.t1) for b in track.beats]
+    return track
+
+
+@contextmanager
+def exaggerated(scales):
+    """Make some of puppy_motion's beat sizes bigger for a preview that has to show them: scales is
+    {"behaviors.WIND_UP_SHIFT_M": 1.7, ...} (module.constant -> factor). The Director composes and
+    validates the bigger beats as usual (they still fit the caps and the clearance floors); its beat
+    cache is emptied around the change."""
+    import importlib
+
+    pm = _pm()
+    old = []
+    pm._CACHE.clear()
+    try:
+        for key, factor in scales.items():
+            module, name = key.split(".")
+            mod = importlib.import_module(f"puppy_motion.{module}")
+            old.append((mod, name, getattr(mod, name)))
+            setattr(mod, name, getattr(mod, name) * factor)
+        yield
+    finally:
+        for mod, name, value in old:
+            setattr(mod, name, value)
+        pm._CACHE.clear()

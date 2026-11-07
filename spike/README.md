@@ -47,19 +47,19 @@ far it moves the eye and the mouth (the farther fingertip) on screen in the clos
 | clip | what it shows |
 |---|---|
 | `idle_alive` | 9.6 s at home: breathing, hello to the user, a curious tilt, a look at the container, back to forward |
-| `curious_tilt` | at home the container catches its eye: a look, two sniffs, a double head tilt, a breath |
+| `curious_tilt` | at home the container catches its eye: a look, two sniffs, a double head tilt, a breath (puppy_motion's behaviors and compose) |
 | `doze_wake` | nothing to do: it dozes off; a task request wakes it: startle, stretch, a nod to the user |
-| `eager_start` | the start of run 132745, plain vs Puppy Mode: eager at the request, a wind-up, the recorded move, a follow-through (4.4 s -> 10.1 s, no budget) |
-| `anticipation_pair` | a scripted free move, plain vs Puppy Mode: a wind-up before and a follow-through after, at no time cost |
-| `lock_on_view` | run 132745's approach: a lean-in stare at the view pose before the reach (the first robot version; +0.9 s) |
-| `lock_on_standoff` | the same with a stop at the 10 cm standoff and a x0.75 creep (needs the reach split into two calls; +3.7 s) |
-| `boop_button` | a scripted button press, plain vs Puppy Mode: a focused crouch and stare, the press, a happy wag with chomps (+5.8 s, demo budget) |
-| `success_proud` | proud while holding (level, no wag) and proud empty-handed (wag and chomps) (+5.7 s, demo budget) |
-| `oops_retry` | illustrative: a miss, then freeze, double take, sorry, puppy eyes, shake-off, a wind-up and a retry (no budget, +13.4 s) |
+| `eager_start` | the start of run 132745, plain vs Puppy Mode, through puppy_motion's Director: eager at the request, then the recorded move (the demo budget keeps nothing else; 4.4 s -> 7.2 s) |
+| `anticipation_pair` | a scripted free move, plain vs Puppy Mode (the Director, budget lifted): a wind-up before and a follow-through after, twice the vocabulary's size (+2.8 s) |
+| `lock_on_view` | run 132745's approach: a lean-in stare at the view pose before the reach (the first robot version; +1.8 s) |
+| `lock_on_standoff` | the same with a stop at the (about) 11 cm standoff and a x0.75 creep (needs the reach split into two calls; +3.0 s) |
+| `boop_button` | a scripted button press with a staging stop, plain vs Puppy Mode (the Director): a lean-in stare at the button before the approach, the press, a proud look (+5.5 s, demo budget) |
+| `success_proud` | two successes through the Director, a pick and a put-back: proud and attentive while holding (level), proud (with chomps) and attentive empty-handed (+11.9 s, two demo budgets) |
+| `oops_retry` | illustrative: a miss (aborted, recoverable failure), then search, sorry, shake-off, a lock-on before the retry and a proud (budget lifted to 30 s, +21.7 s) |
 | `wag_compare` | the same wag inside today's envelope vs the 'snappy' wrist (3 vs 9 rad/s^2) |
 | `replay_plain` | the real run `grab_container_20261029_132745` replayed with no personality (counter camera) |
-| `replay_pair` | that run plain and through the director side by side: beats only between moves, the 'demo' budget, the lock-on at the view pose (15.1 s plain, 20.7 s Puppy Mode) |
-| `failure_pair` | the real refusal in run 191809 ("frames disagree > 1 cm"): curious, lock-on, puzzled, sorry, shake-off (14.5 s -> 20.4 s; eager start left out to fit) |
+| `replay_pair` | that run plain and through the director side by side: beats only between moves, the 'demo' budget, the lock-on at the view pose (15.1 s plain, 21.0 s Puppy Mode) |
+| `failure_pair` | the real refusal in run 191809 ("frames disagree > 1 cm"): sorry and a short shake-off (14.5 s -> 20.1 s; the request is before the window) |
 | `reel_at_rest` | breathe, micro-life, gaze, head tilt, perk, droop with puppy eyes, doze and wake, each once at home, its name in the chip |
 | `reel_reactions` | nod, bounce, wiggle, clack, sniff, double take, search, startle, shake off, proud |
 | `reel_craft` | wind-up, follow-through and lock-on between scripted moves; the lead gaze rides on one (labelled 'later: in motion') |

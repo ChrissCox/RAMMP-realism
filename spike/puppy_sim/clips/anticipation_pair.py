@@ -3,8 +3,9 @@ counter, the arm turns to look up and to the right (a glance away from the conta
 move Puppy Mode winds up (a small draw-back against the coming move, at rest again before the move
 starts) and once the arm has arrived and stopped it follows through (the head carries on a little
 the way it was going, then settles with a small wobble). Both play only while the arm is stopped
-(the boundary tier, placed by the director, whose other beats are left out), so the move itself
-runs as scripted.
+(the boundary tier), decided by puppy_motion's Director from the stops the capability reports
+(its budget lifted so the reserve for the beats of a whole task leaves room), so the move itself
+runs as scripted. The wind-up and the follow-through are twice the vocabulary's size, to show.
 
 A scripted move rather than the real home -> view: at home the draw-back would point at the user,
 and the clearance floor there cuts it to a few pixels; here, 0.9 m from the user, it has room.
@@ -13,7 +14,7 @@ and the clearance floor there cuts it to a few pixels; here, 0.9 m from the user
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from .. import director, runs, scene
+from .. import lib, replay, runs, scene
 from ..kin import UP, across_gaze
 from ..timeline import DT, Label, concat, constant_track, joint_move
 from . import PairClip
@@ -24,8 +25,9 @@ TURN_RAD = (np.radians(-22.0), np.radians(-12.0))  # (pan right, tilt up): it tu
 REST_S = 1.6  # still before the move is asked for
 PLAN_S = 0.8  # the move's phase starts this long before the arm moves (the real run's approach: 0.77 s planning)
 MOVE_S = 2.2
+BIGGER = {"behaviors.WIND_UP_SHIFT_M": 2.0, "behaviors.FOLLOW_SHIFT_M": 2.0}  # the wind-up and the follow-through
+LIFTED_BUDGET_S = 30.0  # the demo budget reserves time for the beats of a whole task; this scripted move is one stop pair
 ARRIVE_S = 3.2  # still after it: the follow-through, then calm
-ONLY = ("wind_up", "follow_through")
 
 
 def _side_pose(kin, q):
@@ -60,12 +62,17 @@ def functional(kin):
 
 
 def build():
-    sc = scene.build()
-    kin = sc.kin()
-    func = functional(kin)
-    skip = tuple(b for b in director.BEATS if b not in ONLY)
-    puppy, _ = director.direct_track(func, "grab_container", sc, kin, skip=skip)
-    return func, puppy
+    """Plain, and Puppy Mode through puppy_motion's Director: the capability reports the move's stops
+    (BeforeMove at the end of the first, AfterMove at the start of the last), so the director winds up
+    before the move and follows through after it, and nothing else."""
+    from puppy_motion import director as pm
+
+    e = lib.env()
+    func = functional(e.kin)
+    events = replay.sorted_events([(0.0, pm.Phase("home", "")), *replay.stop_events(func)])
+    with replay.exaggerated(BIGGER):  # bigger than the vocabulary's, to show
+        puppy = replay.direct_scripted(func, events, budget_s=LIFTED_BUDGET_S, e=e)
+    return func, replay.display_names(puppy)
 
 
 CLIP = PairClip(

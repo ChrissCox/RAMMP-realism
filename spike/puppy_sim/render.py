@@ -20,7 +20,7 @@ from PIL import Image, ImageDraw, ImageFont
 from scipy.ndimage import gaussian_filter1d
 
 from . import scene as scene_mod
-from .timeline import DT, FREE, NEAR_USER, PRECISION
+from .timeline import DT, FREE, NEAR_USER, PRECISION, functional_of
 
 MEDIA_DIR = scene_mod.SPIKE_DIR / "media"
 WORK_DIR = MEDIA_DIR / "_work"
@@ -402,7 +402,7 @@ def legibility(track, kin, camera=LEGIBILITY_CAMERA, size=SINGLE_SIZE):
     """[Legibility] per beat of a composed track, measured in CAMERAS[camera] at `size`."""
     cam = CAMERAS[camera]
     look = cam.lookats(track, kin)
-    func = track.func
+    func = functional_of(track)
     pts, ref = _face_points(kin, track.q, track.grip, track.held), _face_points(kin, func.q, func.grip, func.held)
     moved = np.stack(
         [

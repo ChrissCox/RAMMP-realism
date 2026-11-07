@@ -14,8 +14,9 @@ another: HELLO, CURIOUS, INTERESTED.
 
 import numpy as np
 
-from .. import behaviors as B
-from .. import layer, runs, scene
+from puppy_motion import behaviors as B
+
+from .. import lib, runs
 from ..timeline import Label, constant_track
 from . import REST_GRIP, Clip
 
@@ -29,13 +30,12 @@ LOOK_HOLD_S = 1.0
 
 
 def build():
-    sc = scene.build()
-    kin = sc.kin()
+    e = lib.env()
     rest = constant_track(runs.HOME_JOINTS, REST_GRIP, IDLE_S, name="rest at home")
-    runs.mark_near_user(rest, kin)
-    ctx = B.Context.of(rest, sc, kin)
+    runs.mark_near_user(rest, e.kin)
+    ctx = lib.context(rest, e)
     glance = B.plan_gaze(ctx, ctx.person, GLANCE_ON_S, lean_m=0.0, max_turn_rad=GLANCE_MAX_RAD, lift_m=GLANCE_LIFT_M)
-    look = B.plan_gaze(ctx, ctx.container, GLANCE_ON_S)
+    look = B.plan_gaze(ctx, ctx.targets.container, GLANCE_ON_S)
     turn_s = max(glance[2], look[2])  # one turn time for both, so the glance blends into the look
     t_tilt = GLANCE_ON_S + turn_s + SETTLE_S
     tilt_s = B.paced_move(ctx, t_tilt, [0.0, 0.0, 0.0, B.TILT_RAD, 0.0, 0.0], B.TILT_TURN_S, B.TILT_OVERSHOOT)
@@ -61,10 +61,10 @@ def build():
             name="glance at the user",
         ),
         B.head_tilt(ctx, t_tilt, t_untilt),
-        B.gaze_to(ctx, ctx.container, t_look, t_back, turn_s=turn_s, name="look at the container"),
+        B.gaze_to(ctx, ctx.targets.container, t_look, t_back, turn_s=turn_s, name="look at the container"),
         ctx.empty("labels", labels),
     ]
-    return layer.compose(rest, parts, kin)
+    return lib.compose(rest, parts, e)
 
 
 CLIP = Clip(

@@ -13,8 +13,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .. import behaviors as B
-from .. import layer, render, runs, scene
+from puppy_motion import behaviors as B
+
+from .. import lib, render, runs
 from ..timeline import constant_track
 from . import REST_GRIP, PairClip
 
@@ -40,25 +41,22 @@ render.CAMERAS.setdefault(CAMERA, _close_for_pairs())
 
 
 def wag_track(caps, sc=None, kin=None):
-    """The wags at home, composed under the cap preset `caps`."""
-    sc = sc or scene.build()
-    kin = kin or sc.kin()
+    """The wags at home, composed under the cap preset `caps` (sc and kin are not needed: lib.env())."""
+    e = lib.env()
     duration = WAG_AT_S[-1] + B.WIGGLE_CYCLES / B.WIGGLE_HZ + END_REST_S
     rest = constant_track(runs.HOME_JOINTS, REST_GRIP, duration, name="rest at home")
-    runs.mark_near_user(rest, kin)
-    ctx = B.Context.of(rest, sc, kin, caps=caps)
-    return layer.compose(rest, [B.wiggle(ctx, t, beat=CHIP) for t in WAG_AT_S], kin, caps)
+    runs.mark_near_user(rest, e.kin)
+    ctx = lib.context(rest, e, caps)
+    return lib.compose(rest, [B.wiggle(ctx, t, beat=CHIP) for t in WAG_AT_S], e, caps)
 
 
 def build():
-    sc = scene.build()
-    kin = sc.kin()
-    return wag_track(layer.DEFAULT_CAPS, sc, kin), wag_track(SNAPPY, sc, kin)
+    return wag_track("default"), wag_track(SNAPPY)
 
 
 def wrist_swing_deg(track):
     """The largest swing (deg) a wrist joint (5-7) makes about its functional angle."""
-    return float(np.degrees(np.abs(track.q - track.func.q)[:, layer.WRIST_JOINTS].max()))
+    return float(np.degrees(np.abs(track.q - track.func.q)[:, B.WRIST_JOINTS].max()))
 
 
 @dataclass(frozen=True)

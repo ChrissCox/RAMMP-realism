@@ -14,10 +14,12 @@ back. Breathing pauses while it concentrates; once the head is back it lets out 
 """
 
 import numpy as np
+from puppy_motion import behaviors as B
+from puppy_motion import curves
+from puppy_motion.compose import Contribution  # noqa: F401  (the type parts() returns)
 
-from .. import behaviors as B
-from .. import curves, layer, runs, scene
-from ..kin import UP, head_rotation
+from .. import lib, runs
+from ..kin import UP
 from ..timeline import Label, constant_track
 from . import REST_GRIP, Clip
 
@@ -28,9 +30,6 @@ SNIFF_PECKS = 2
 SNIFF_LEAN_M = 0.02
 TILT_OVERLAP_S = 0.4  # the tilt starts this long before the sniff has leaned back
 TILT_RAD = np.radians(14.0)  # each side of the double tilt
-TILT_PIVOT_M = 0.06  # the tilt pivots up to this far below the gaze axis (on its neck)
-PIVOT_BLEND = 1.0 / 3.0  # the pivot depth blends from one side's to the other's within this share of the tilt
-PIVOT_HEADROOM = 1.2  # the pivots are sized for a tilt this much bigger (its overshoot, the overlapping parts)
 TILT_HOLD_S = 0.35
 SWING_OVERSHOOT = 0.0  # the swing from one side to the other is the long move: no overshoot
 BREATH_LEAD_S = 2.0  # the breathing before has been going this long when the clip starts
@@ -64,51 +63,10 @@ def tilt_roll(ctx, t_on, angle_rad=TILT_RAD, hold_s=TILT_HOLD_S, side=1, level_s
     return roll, t_start, t_k
 
 
-def _pivot_shift(R, roll, depth_m):
-    """World shift (3,) that makes a roll about the gaze pivot depth_m below the gaze axis, in the
-    head frame R."""
-    return R @ np.array([-np.sin(roll), np.cos(roll) - 1.0, 0.0]) * depth_m
-
-
-def safe_pivots(ctx, t, look, roll_rad, pivot_m=TILT_PIVOT_M):
-    """(depth for +roll_rad, depth for -roll_rad): the deepest pivot (at most pivot_m) each side of
-    the tilt may use at the look's pose at t, keeping every arm part SAFE_MARGIN_M above its
-    clearance floors (beside the user the head may not swing toward them)."""
-    i = ctx.index(t)
-    q, grip, held = ctx.track.q[i], ctx.track.grip[i], bool(ctx.track.held[i])
-    func = ctx.kin.clearances(q, grip, held)
-    floor = np.minimum(layer.clearance_floor(func[None])[0] + B.SAFE_MARGIN_M, func)
-    _, R = ctx.kin.fk(q, "ee")
-    gazed = R @ head_rotation(look.head[i])
-
-    def clear(roll, depth):
-        offset = look.head[i] + np.concatenate([_pivot_shift(gazed, roll, depth), [roll, 0.0, 0.0]])
-        return bool(np.all(ctx.kin.clearances(q + ctx.kin.head_dq(q, offset), grip, held) >= floor))
-
-    depths = []
-    for roll in (roll_rad, -roll_rad):
-        lo, hi = 0.0, pivot_m
-        if clear(roll, hi):
-            lo = hi
-        for _ in range(B.SAFE_SCALE_STEPS):
-            mid = 0.5 * (lo + hi)
-            lo, hi = (mid, hi) if clear(roll, mid) else (lo, mid)
-        depths.append(lo)
-    return tuple(depths)
-
-
-def double_tilt(ctx, roll, look, depths, angle_rad=TILT_RAD):
-    """The tilt as a contribution: `roll` (N,) about the gaze, in the head frame the look (a
-    contribution) gives at each sample, pivoting below the gaze axis by depths[0] on the +roll side
-    and depths[1] on the other, blended smoothly through level, so the head swings to the side it
-    tilts to as far as the clearance floors allow."""
-    mid, half = (depths[0] + depths[1]) / 2.0, (depths[0] - depths[1]) / 2.0
+def double_tilt(ctx, roll):
+    """The tilt as a contribution: `roll` (N,) about the gaze."""
     c = ctx.empty("double tilt")
     c.head[:, 3] = roll
-    for i in np.nonzero(roll)[0]:
-        _, R = ctx.kin.fk(ctx.track.q[i], "ee")
-        depth = mid + half * np.tanh(roll[i] / (angle_rad * PIVOT_BLEND))
-        c.head[i, :3] = _pivot_shift(R @ head_rotation(look.head[i]), roll[i], depth)
     return c
 
 
@@ -118,43 +76,42 @@ def sigh(ctx, t_on, rise_m=SIGH_RISE_M, lift_rad=SIGH_LIFT_RAD, in_s=SIGH_IN_S, 
     t = ctx.track.t
     env = curves.ramp(t, t_on, t_on + in_s) - curves.ramp(t, t_on + in_s, t_on + in_s + out_s)
     c = ctx.empty("breath")
-    for i in np.nonzero(env)[0]:
-        c.head[i, :3] = UP * rise_m * env[i]
-        c.head[i, 3:] = ctx.kin.gravity_turn(ctx.track.q[i], 0.0, -lift_rad * env[i])
+    c.head[:, :3] = UP * rise_m * env[:, None]
+    B._add_gravity(ctx, c, tilt=-lift_rad * env)
     return c
 
 
 def parts(ctx):
     """(contributions, when it is done) on the still track in ctx."""
+    container = ctx.targets.container
     t_notice = CALM_S
-    _, _, turn_s, _ = B.plan_gaze(ctx, ctx.container, t_notice, lift_m=NOTICE_LIFT_M)
-    sniff = B.sniff(ctx, ctx.container, t_notice + SNIFF_AT * turn_s, pecks=SNIFF_PECKS, lean_m=SNIFF_LEAN_M)
+    _, _, turn_s, _ = B.plan_gaze(ctx, container, t_notice, lift_m=NOTICE_LIFT_M)
+    sniff = B.sniff(ctx, container, t_notice + SNIFF_AT * turn_s, pecks=SNIFF_PECKS, lean_m=SNIFF_LEAN_M)
     t_tilt = sniff.span()[1] - TILT_OVERLAP_S
     roll, t_off, t_back = tilt_roll(ctx, t_tilt, level_s=turn_s)
-    look = B.gaze_to(ctx, ctx.container, t_notice, t_off, lift_m=NOTICE_LIFT_M, name="look at the container")
-    look.beats = [Label("CURIOUS", t_notice, t_off + turn_s / 2)]
-    depths = safe_pivots(ctx, t_tilt, look, TILT_RAD * PIVOT_HEADROOM)
+    look = B.gaze_to(ctx, container, t_notice, t_off, lift_m=NOTICE_LIFT_M, name="look at the container")
+    look.labels = [Label("CURIOUS", t_notice, t_off + turn_s / 2)]
     breath = sigh(ctx, t_back - SIGH_AT_S)
     t = ctx.track.t
     before = B.breathe(ctx, -BREATH_LEAD_S, t_back, avoid=t >= t_notice)  # holds its breath once it notices
-    return [before, look, sniff, double_tilt(ctx, roll, look, depths), breath], breath.span()[1]
+    return [before, look, sniff, double_tilt(ctx, roll), breath], breath.span()[1]
 
 
-def rest_and_parts(sc, kin):
+def rest_and_parts(e=None):
     """(the still track at home, its contributions): timed on a long still track first, then
     played on one just long enough."""
+    e = e or lib.env()
     home = np.array(runs.HOME_JOINTS)
-    _, t_done = parts(B.Context.of(constant_track(home, REST_GRIP, PROBE_S), sc, kin))
+    _, t_done = parts(lib.context(constant_track(home, REST_GRIP, PROBE_S), e))
     rest = constant_track(home, REST_GRIP, t_done + TAIL_S, name="rest at home")
-    runs.mark_near_user(rest, kin)
-    return rest, parts(B.Context.of(rest, sc, kin))[0]
+    runs.mark_near_user(rest, e.kin)
+    return rest, parts(lib.context(rest, e))[0]
 
 
 def build():
-    sc = scene.build()
-    kin = sc.kin()
-    rest, contributions = rest_and_parts(sc, kin)
-    return layer.compose(rest, contributions, kin)
+    e = lib.env()
+    rest, contributions = rest_and_parts(e)
+    return lib.compose(rest, contributions, e)
 
 
 CLIP = Clip(

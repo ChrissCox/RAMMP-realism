@@ -10,29 +10,28 @@ closed all the way) and the arm holds where it stopped (FREE, as the zone table 
 gripper; it approaches again to the run's own grasp pose, closes on the brim and lifts the
 container to the run's own raised pose (all PRECISION); it stops, holding.
 
-Puppy Mode, only in those stops: where it missed, it freezes (above the brim nothing may move
-toward the container: any reaction there would cross the obstacle floor); at the retry standoff a
-double take at the container (look, glance away, snap back: it is still there), a droop with puppy
-eyes up toward the user, a shake-off, and a wind-up just before the retry (the retry approach
-dips the gaze, so the wind-up rears the head back against it); after the raise a small
-proud, muted while holding. The reactions to the miss go past the 'demo' budget's 6 s (all of
-them are shown here); the subtitle states what each part adds.
-
+Puppy Mode, only in those stops, decided by puppy_motion's Director from the events the capability
+would report. Where it missed it stays stock still (above the brim nothing may move toward the
+container: a reaction there would cross the obstacle floor). Once it has backed off to the retry
+standoff (the zone table's 'aborted' phase, then a recoverable failure) it looks around for the container (search), droops with puppy eyes up toward the user (sorry) and
+shakes it off; at the retry standoff, the move that follows ends at a precise pose, so it leans in
+and stares (lock-on); after the raise a small proud, muted while holding. The reactions go past
+the 'demo' budget's 6 s (all of them are shown here: it is lifted for this preview); the subtitle
+states what each part adds.
 The camera follows the head like close_follow, a little further back and aimed lower, so the
 container stays in frame while the arm waits above it.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from .. import behaviors as B
-from .. import render, runs, scene
+from .. import lib, render, replay, runs, scene
 from ..kin import UP, across_gaze
-from ..timeline import DT, FREE, PRECISION, Label, concat, constant_track, joint_move, scripted_track
+from ..timeline import DT, FREE, PRECISION, concat, constant_track, joint_move, scripted_track
 from . import Clip
-from .success_proud import HOLDING_CHIP, min_jerk_grip, proud_level, staged, stop_at
+from .success_proud import HOLDING_CHIP, min_jerk_grip
 
 # the scripted task
 STANDOFF_M = 0.12  # the pre-grasp standoff, back along the run's approach
@@ -51,20 +50,10 @@ RETRY_APPROACH_S = 1.8  # 18 cm, diagonally down to the grasp
 RAISE_S = 1.2  # to the run's own raised pose (6 cm up, the gaze level)
 END_S = 0.4
 
-# the beats (the sorry as the director's full one: the eyes as the droop arrives, back in one move)
-FREEZE_S = 0.5  # stock still where it missed
-GLANCE_SPOT = (-0.02, 0.17, 0.0)  # the double take's glance away: a spot on the counter, from the container (m)
-TAKE_GAP_S = 0.1  # the sorry starts this long after the double take
-SORRY_QUICK = 0.8  # the droop sags this much quicker than its design
-EYES_AFTER_S = 0.7  # the sheepish look up at the user starts as the droop arrives
-EYES_HOLD_S = 0.3  # held this long; then the eyes come down as the droop lifts
-SHAKE_GAP_S = 0.05  # the shake-off starts this long after
-SHAKE_CYCLES = 2.0  # the director's full shake is 3
-PROUD_LOOK_RAD = np.radians(12.0)  # a small proud (the director's): holding, a level look at the user
-CHIPS = {"freeze": "FREEZE", "take": "DOUBLE TAKE", "droop": "SORRY", "eyes": "PUPPY EYES", "shake": "SHAKE IT OFF"}
-WIND_CHIP = "WIND UP"
+BIGGER = {"director.LOCK_LEAN_M": 1.6}  # the lock-on leans in further than the director's, to show
+LIFTED_BUDGET_S = 30.0  # the reactions to the miss go past the demo budget's 6 s; all are shown
+EDGE_S = 3 * DT  # an event arrives this far into a stop
 MISS_PHASES = ("missed", "back off", "retry")  # where the reactions to the miss add their time
-
 CAMERA = "oops_follow"
 render.CAMERAS.setdefault(  # close_follow, further back and aimed lower: the container stays in frame
     CAMERA, render.Camera(None, 0.85, 148.0, -12.0, 40.0, head_offset=(0.06, -0.04, -0.08), follow_s=0.5)
@@ -110,60 +99,42 @@ def functional(sc, kin):
     return func
 
 
-def freeze(ctx, t0):
-    """Stock still for a beat where the gripper closed on air: the pause is Puppy Mode's (a hold)."""
-    return [ctx.empty("freeze", [Label(CHIPS["freeze"], t0, t0 + FREEZE_S)])]
-
-
-def oops(ctx, t0):
-    """A double take at the container (look at it, glance away, snap back with a lean in: it is
-    still there), then the sorry."""
-    container = ctx.container
-    take = B.double_take(ctx, container, container + np.array(GLANCE_SPOT), t0, beat=CHIPS["take"])
-    return [take, *sorry(ctx, take.span()[1] + TAKE_GAP_S)]
-
-
-def sorry(ctx, t0):
-    """A droop; as it arrives, the sheepish look up toward the user (puppy eyes), held a moment;
-    the eyes come down as the droop lifts; then a shake to shake it off."""
-    t_eyes = t0 + EYES_AFTER_S
-    turn_s = (B.puppy_eyes(ctx, t_eyes, t_eyes).span()[1] - t_eyes) / 2.0  # up and straight back
-    t_back = t_eyes + turn_s + EYES_HOLD_S
-    eyes = B.puppy_eyes(ctx, t_eyes, t_back)
-    sag = B.droop(ctx, t0, t_back, quick=SORRY_QUICK)
-    t_shake = max(eyes.span()[1], sag.span()[1]) + SHAKE_GAP_S
-    shake = B.shake_off(ctx, t_shake, cycles=SHAKE_CYCLES)
-    chips = [
-        Label(CHIPS["droop"], t0, t_eyes),
-        Label(CHIPS["eyes"], t_eyes, t_back + turn_s),
-        Label(CHIPS["shake"], t_shake, shake.span()[1]),
-    ]
-    return [sag, eyes, shake, ctx.empty("chips", chips)]
-
-
-def wind_up(ctx, t1):
-    """The wind-up, back at rest at t1 (the stop's end margin, just before the retry approach)."""
-    return [B.wind_up(ctx, t1 - B.wind_up_s(ctx, t1, t1), t1, beat=WIND_CHIP)]
-
-
-def wind_up_length(ctx, t1):
-    return B.wind_up_s(ctx, t1, t1)
-
-
 def build():
-    sc = scene.build()
-    kin = sc.kin()
-    func = functional(sc, kin)
-    missed, retry, done = (stop_at(func, phase) for phase in ("missed", "retry", "done"))
-    plays = {missed: freeze, retry: oops, done: proud_level(PROUD_LOOK_RAD, HOLDING_CHIP)}
-    puppy, _ = staged(func, plays, sc, kin, finales={retry: (wind_up, wind_up_length)})
-    return puppy
+    """Puppy Mode through the Director, as the capability would drive it: the miss is an aborted
+    phase and a recoverable failure, reported once the arm has backed off to the retry standoff (above
+    the brim, where it missed, it stays stock still: the library does not know the container is
+    there, and a droop would cross it); the retry's move ends at a precise pose; then the success."""
+    from puppy_motion import director as pm
+
+    e = lib.env()
+    func = scripted(e)
+    standoff, missed, retry, done = replay._stage_runs(func)
+    events = replay.sorted_events(
+        [
+            (retry[0] * DT + EDGE_S, pm.Phase("aborted", "")),
+            (retry[0] * DT + EDGE_S, pm.Failed(True)),
+            (retry[0] * DT + 2 * EDGE_S, pm.Phase("grasp", "opening")),
+            (retry[1] * DT - EDGE_S, pm.BeforeMove(True)),
+            (done[0] * DT + EDGE_S, pm.Phase("done", "")),
+            (done[0] * DT + EDGE_S, pm.Succeeded()),
+        ]
+    )
+    with replay.exaggerated(BIGGER):
+        puppy = replay.direct_scripted(func, events, budget_s=LIFTED_BUDGET_S, e=e)
+    for sp, lb in zip(puppy.spliced, puppy.beats):
+        if sp.beat.name == "proud":
+            puppy.beats[puppy.beats.index(lb)] = replace(lb, name=HOLDING_CHIP)
+    return replay.display_names(puppy)
+
+
+def scripted(e):
+    return functional(e.sc, e.kin)
 
 
 def added_s(track, phases):
     """Seconds the time-warp of a composed track adds while its functional motion is in any of
     `phases` (by name, on the output clock)."""
-    func = track.func
+    func = track.func if track.func is not None else track
     inside = np.zeros(func.n, dtype=bool)
     for p in func.phases:
         if p.name in phases:

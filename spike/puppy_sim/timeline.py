@@ -135,6 +135,12 @@ def resample_track(track, u):
     )
 
 
+def functional_of(track):
+    """The plain path on `track`'s clock: its composed `func`, or for a replay (a directed track
+    that plays the plain path with beats spliced in) the source track at its tau."""
+    return track.func if track.func is not None else resample_track(track.source, track.tau / DT)
+
+
 def _first_reaching(src_t, t):
     """Output time of the first sample whose source time reaches t (the end if none does)."""
     return int(np.searchsorted(src_t, t - 1e-9)) * DT

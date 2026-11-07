@@ -7,9 +7,9 @@ short approach whose last few centimetres are PRECISION, which then runs exactly
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+from puppy_motion import behaviors as B
 
-from .. import behaviors as B
-from .. import director, layer, runs, scene
+from .. import lib, replay, runs
 from ..kin import UP, across_gaze
 from ..timeline import DT, PRECISION, Label, concat, constant_track, joint_move, scripted_track
 from . import REST_GRIP, Clip
@@ -28,6 +28,7 @@ LOCK_TARGET_AHEAD_M = 0.3  # the stare is at a point straight ahead
 PRECISE_REST_S = 1.0
 RETREAT_S = 2.2
 END_REST_S = 1.2
+STILL_MARGIN_S = 0.1  # beats start this long after the arm stops and end this long before it moves
 LEAD_CHIP = "LEAD GAZE (later: in motion)"
 
 
@@ -77,22 +78,22 @@ def _functional(kin, home):
 
 
 def build():
-    sc = scene.build()
-    kin = sc.kin()
+    e = lib.env()
+    kin = e.kin
     func = _functional(kin, np.array(runs.HOME_JOINTS))
-    ctx = B.Context.of(func, sc, kin)
-    home_stop, side_stop, lock_stop = director.stages(func)[:3]
-    margin = director.STILL_MARGIN_S
-    go, arrive = home_stop.t1, side_stop.t0
+    ctx = lib.context(func, e)
+    (h0, h1, _, _), (s0, s1, _, _), (l0, l1, _, _) = replay._stage_runs(func)[:3]  # the stops at home, at the side, before the approach
+    margin = STILL_MARGIN_S
+    go, arrive = h1 * DT, s0 * DT
     wind_s = B.wind_up_s(ctx, go - margin, go)
-    stare = (lock_stop.t0 + margin, lock_stop.t1 - margin)
-    eye, R = kin.fk(func.q[lock_stop.i0], "eye")
+    stare = (l0 * DT + margin, l1 * DT - margin)
+    eye, R = kin.fk(func.q[l0], "eye")
     precise = np.nonzero(func.zone == PRECISION)[0]
     labels = [
         Label("WIND UP", go - margin - wind_s, go - margin),
         Label(LEAD_CHIP, go - B.LEAD_S, arrive),
         Label("FOLLOW THROUGH", arrive + margin, arrive + margin + B.FOLLOW_SETTLE_S),
-        Label("PLAIN MOVE", side_stop.t1, lock_stop.t0),
+        Label("PLAIN MOVE", s1 * DT, l0 * DT),
         Label("LOCK ON", *stare),
         Label("FOCUS", precise[0] * DT, (precise[-1] + 1) * DT),
     ]
@@ -103,7 +104,7 @@ def build():
         B.lock_on(ctx, eye + LOCK_TARGET_AHEAD_M * R[:, 2], *stare),
         ctx.empty("labels", labels),
     ]
-    return layer.compose(func, parts, kin)
+    return lib.compose(func, parts, e)
 
 
 CLIP = Clip(
