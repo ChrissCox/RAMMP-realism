@@ -621,3 +621,72 @@ def format_responses(rows):
                 f"under {SETTLED_MM} mm after {p.settle_s:.2f} s"
             )
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------------------- overshoot report
+FEEDFORWARDS = (("pos+vel+acc", True), ("pos+vel", VELOCITIES), ("pos only", False))
+
+
+def _overshoot_tracks(sc, kin):
+    """{name: composed Puppy Mode track} for the three beats the overshoot is reported on: the
+    happy wag and the bounce at home, and lock_on_view's lean and stare."""
+    from . import behaviors as B
+    from . import layer, runs
+    from .clips.lock_on_view import directed
+    from .clips.wag_compare import END_REST_S, REST_GRIP, WAG_AT_S, wag_track
+    from .timeline import constant_track
+
+    caps = layer.DEFAULT_CAPS
+    rest = constant_track(runs.HOME_JOINTS, REST_GRIP, WAG_AT_S[0] + 3 * B.BOUNCE_HOP_S + END_REST_S + 1.0, name="rest at home")
+    runs.mark_near_user(rest, kin)
+    ctx = B.Context.of(rest, sc, kin, caps=caps)
+    hop = B.bounce(ctx, WAG_AT_S[0], beat="BOUNCE")
+    return {
+        "wag": wag_track(caps, sc, kin),
+        "lock_on": directed("view")[1],
+        "bounce": layer.compose(rest, [hop], kin, caps),
+    }
+
+
+def overshoot(track, ctl, sc, kin, plant=DEFAULT_PLANT):
+    """How far the arm overshoots the beat's command under `ctl`: over the beats' own windows, the
+    largest |achieved - commanded| of any joint (rad), the largest head-point (eye, tool) error (mm),
+    and the over-travel: the most any joint's achieved excursion from its pose at the beat's start
+    exceeds the commanded excursion on the same side, as a fraction of the commanded excursion
+    (joints that move under 0.01 rad are left out)."""
+    ach = achieved(track, ctl, sc, plant)
+    on = np.zeros(track.n, dtype=bool)
+    for b in render.legibility(track, kin):
+        on[int(round(b.t0 / DT)) : min(int(round(b.t1 / DT)), track.n - 1) + 1] = True
+    err = np.abs(ach.q - track.q)[on]
+    ref = track.q[on] - track.q[on][0]
+    got = ach.q[on] - track.q[on][0]
+    over = 0.0
+    for sign in (1.0, -1.0):
+        peak = (sign * ref).max(axis=0)
+        moved = peak > 0.01
+        if moved.any():
+            over = max(over, float(((sign * got).max(axis=0)[moved] - peak[moved]).max() / peak[moved].max()))
+    mm = point_error_mm(kin, track.q, ach.q)[on].max()
+    return {"err_rad": float(err.max()), "err_mm": float(mm), "over_travel": over}
+
+
+def overshoot_report(profiles=("soft", "default", "stiff"), plant=DEFAULT_PLANT):
+    """[(beat, feedforward label, profile, overshoot dict)] for the wag, lock_on and the bounce under
+    each trajectory format the driver can be sent: positions+velocities+accelerations, positions and
+    central-difference velocities (what execute_joint_trajectory sends), positions only."""
+    sc = scene.build()
+    kin = sc.kin()
+    rows = []
+    for name, track in _overshoot_tracks(sc, kin).items():
+        for label, ff in FEEDFORWARDS:
+            for profile in profiles:
+                rows.append((name, label, profile, overshoot(track, control(f"impedance:{profile}", ff), sc, kin, plant)))
+    return rows
+
+
+def format_overshoot(rows):
+    lines = [f"{'beat':8s} {'trajectory':12s} {'gains':8s} {'max err rad':>11s} {'max err mm':>10s} {'over-travel':>11s}"]
+    for name, label, profile, o in rows:
+        lines.append(f"{name:8s} {label:12s} {profile:8s} {o['err_rad']:11.4f} {o['err_mm']:10.1f} {o['over_travel']:11.1%}")
+    return "\n".join(lines)

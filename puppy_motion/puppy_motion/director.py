@@ -17,6 +17,14 @@ Nothing spatial comes from a Phase the zone table maps to PRECISION (an unknown 
 from a move made while the current phase is PRECISION, from any event while the arm holds something
 and the head is near the person, or from the AfterMove of a move that ended at a precise pose (the
 arm must stay settled for the grasp or the press). Failed(False) gets nothing.
+
+Settle time. Under joint impedance a held container makes the arm spring and settle slowly, so a
+beat that ends just before a PRECISION move must leave it still for longer: while the arm holds
+something, a beat's still tail (the hold after its last motion) is at least SETTLE_S for the task's
+control mode and gains (soft 2.3 s, medium/default 1.1 s, stiff 0.1 s), else the usual (TAIL_S) tail. The
+tail is never shorter than TAIL_S. The mode and gains are the task's last move call's
+(set_control); an impedance mode with gains this table does not know, or a mode it does not know,
+gets the longest. Position mode, or not holding, keeps the tail as before.
 """
 
 from collections import OrderedDict
@@ -37,6 +45,10 @@ from .zones import zone_of
 BUDGETS = {"demo": 6.0, "subtle": 2.5}
 SUBTLE_MIN_KEEP = 6  # the subtle preset plays only rules at least this important
 LOCK_ON_MODES = ("view", "standoff")
+USUAL_SETTLE_S = 0.0  # position mode, or nothing held: the usual tail (TAIL_S) stands
+SETTLE_S = {"soft": 2.3, "medium": 1.1, "default": 1.1, "stiff": 0.1}  # impedance gains profile -> seconds, while held
+LONGEST_SETTLE_S = max(SETTLE_S.values())  # unknown mode or gains
+POSITION_MODES, IMPEDANCE_MODES = (0, "position"), (1, "impedance")  # capability_engine.arm.POSITION / IMPEDANCE
 EPS = 1e-9
 RESERVE_MIN_KEEP = 1  # a rule this unimportant (or less) never reserves time
 ENDING_RESERVE_KEEP = 6  # an ending reaction reserves time for its essential rules only (proud, sorry): the
@@ -273,7 +285,8 @@ def _target_key(targets):
 
 # ----------------------------------------------------------------------------------------- director
 class Director:
-    def __init__(self, capability, chain, scene, targets, preset="demo", lock_on="view", caps=DEFAULT_CAPS, seed=0):
+    def __init__(self, capability, chain, scene, targets, preset="demo", lock_on="view", caps=DEFAULT_CAPS, seed=0,
+                 control=("position", None)):
         rules = load_rules()
         if capability not in rules:
             raise ValueError(f"unknown capability {capability!r}; expected one of {sorted(rules)}")
@@ -285,6 +298,8 @@ class Director:
             raise ValueError(f"unknown caps preset {caps!r}; expected one of {sorted(CAP_PRESETS)}")
         self.capability, self.chain, self.scene, self.targets = capability, chain, scene, targets
         self.preset, self.lock_on, self.caps, self.seed = preset, lock_on, caps, int(seed)
+        self.control = ("position", None)
+        self.set_control(*control)
         # the arm is stopped when an event arrives, so both lock_on modes play the same stare there
         self.rules = rules[capability]
         self.budget_s = BUDGETS[preset]
@@ -299,6 +314,27 @@ class Director:
         self._over = False  # an ending (success or failure) has come
 
     # ------------------------------------------------------------------ public
+    def set_control(self, mode, gains):
+        """Record the control mode and gains of the task's latest move (what a beat now copies)."""
+        self.control = (mode, gains)
+
+    def settle_s(self, held):
+        """The still tail (s) a beat should leave before the next PRECISION move: see the module
+        docstring. Never raises: anything it cannot read is the longest."""
+        if not held:
+            return USUAL_SETTLE_S
+        mode, gains = self.control
+        try:
+            if isinstance(mode, str):
+                mode = mode.strip().lower()
+            if not isinstance(mode, bool) and mode in POSITION_MODES:
+                return USUAL_SETTLE_S
+            if not isinstance(mode, bool) and mode in IMPEDANCE_MODES and isinstance(gains, str):
+                return SETTLE_S.get(gains.strip().lower(), LONGEST_SETTLE_S)
+        except Exception:  # unhashable or odd values
+            pass
+        return LONGEST_SETTLE_S
+
     def on_event(self, event, q_now, held):
         """The beats to play now, in order: each starts and ends at q_now and passes check_beat."""
         if not isinstance(event, EVENTS):
@@ -412,11 +448,12 @@ class Director:
 
     def _beat(self, name, short, q_now, held, zone, tag):
         """The composed, validated beat (cached), or None (why: in the log when `tag` is given)."""
+        tail_s = max(TAIL_S, self.settle_s(held))
         key = (id(self.chain), id(self.scene), _target_key(self.targets), name, short, held, int(zone),
-               self.caps, q_now.tobytes(), self.seed)
+               self.caps, q_now.tobytes(), self.seed, tail_s)
         hit = _CACHE.get(key)
         if hit is None:
-            hit = self._compose(name, short, q_now, held, zone) + (self.chain, self.scene)  # keeps ids alive
+            hit = self._compose(name, short, q_now, held, zone, tail_s) + (self.chain, self.scene)  # keeps ids alive
             _CACHE[key] = hit
             while len(_CACHE) > CACHE_MAX:
                 _CACHE.popitem(last=False)
@@ -428,12 +465,13 @@ class Director:
         # a copy: the cache is shared, and a caller may shift or edit the points it is given
         return Beat(beat.name, beat.mood, [(t, q.copy(), dq.copy()) for t, q, dq in beat.points], beat.zone)
 
-    def _compose(self, name, short, q_now, held, zone):
+    def _compose(self, name, short, q_now, held, zone, tail_s=TAIL_S):
         build, length_s = BEATS[name]
+        length_s += max(0.0, tail_s - TAIL_S)  # room for a longer still tail
         t = self.targets
         target = getattr(t, TARGET_OF.get(self.capability, ""), None)
         seed = int(np.random.default_rng([self.seed, crc32(name.encode())]).integers(1 << 30))
         return compose_beat(
             name, MOODS[name], lambda ctx, rng, h: build(ctx, target, h, short), length_s, q_now, held, zone,
-            self.chain, self.scene, t, seed, caps=self.caps, tail_s=TAIL_S,
+            self.chain, self.scene, t, seed, caps=self.caps, tail_s=tail_s,
         )

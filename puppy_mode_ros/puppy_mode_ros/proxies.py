@@ -6,7 +6,7 @@ to `director_feed(event)`. Every other attribute is the real ctx's.
 PuppyArm(arm, player): the move calls (go_to_*, execute_joint_trajectory, move_joints,
 move_cartesian) feed BeforeMove to the player, forward UNCHANGED to the real arm, and feed AfterMove
 after a normal return. They also record the call's control mode and gains on the player, which the
-beats copy: `control_mode=` / `gains=` of the go_to_* calls and execute_joint_trajectory, and for
+beats copy (and `director.set_control` gets, guarded): `control_mode=` / `gains=` of the go_to_* calls and execute_joint_trajectory, and for
 move_joints / move_cartesian `impedance=` (a dict means IMPEDANCE with those gains, none means
 POSITION). `stream()` marks a stream open until its block exits, and no beat plays meanwhile.
 Every other attribute is the real arm's.
@@ -110,6 +110,7 @@ class PuppyArm:
                 player.fail_move(f"{call} returned {result!r}")
                 return result
             player.record(mode, gains)
+            self._set_control(mode, gains)
             try:
                 player.after_move()
             except EStopped as e:
@@ -117,6 +118,19 @@ class PuppyArm:
             return result
 
         return move
+
+    def _set_control(self, mode, gains):
+        """Tell the director the move's mode and gains (it keeps a longer settle after a beat while
+        the arm holds something under soft impedance). It must never raise into the task's move: a
+        director without set_control, or one that raises, is logged and the move carries on."""
+        player = self._player
+        try:
+            player.director.set_control(mode, gains)
+        except Exception as e:
+            try:
+                player.log(f"puppy: director.set_control failed ({type(e).__name__}: {e})")
+            except Exception:
+                pass
 
     @contextlib.contextmanager
     def stream(self, *args, **kwargs):

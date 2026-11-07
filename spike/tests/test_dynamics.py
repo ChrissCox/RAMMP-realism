@@ -97,7 +97,7 @@ def test_a_wag_stays_finite_in_every_mode(sc, kin):
 
     track = source()
     for spec in ("impedance:soft", "impedance:default", "impedance:stiff"):
-        for ff in (True, False):
+        for ff in (True, dy.VELOCITIES, False):
             ach = dy.achieved(track, dy.control(spec, feedforward=ff), sc)
             assert np.all(np.isfinite(ach.q)) and ach.n == track.n
             assert ach.func is not None and ach.func.commanded is track.func
@@ -163,3 +163,29 @@ def test_compliance_clips_pass_every_check(name):
         assert not failed, (clip, label, failed)
         note = next(c for c in results if c.name == "achieved")
         assert note.detail.startswith(f"under {label} ")
+
+
+def test_positions_and_velocities_are_a_third_trajectory_format(sc, home):
+    """Positions + central-difference velocities (execute_joint_trajectory): its own label and slug,
+    and its reference is neither the quintic one (accelerations) nor the straight line."""
+    ctl = dy.control("impedance:default", feedforward=dy.VELOCITIES)
+    assert ctl.label == "impedance:default (positions+velocities)" and dy.slug(ctl).endswith("_posvel")
+    assert dy.control("impedance:default").label != ctl.label != dy.control("impedance:default", feedforward=False).label
+    track = joint_move(home, home + 0.2, 2.0, grip=0.79)
+    _, qd_vel, qdd_vel = dy.reference(track, dy.VELOCITIES)
+    _, qd_full, qdd_full = dy.reference(track, True)
+    assert not qdd_vel.any() and qdd_full.any() and np.abs(qd_vel).max() > 0.05
+    assert np.abs(qd_vel - qd_full).max() < 0.02  # the same profile within a few rad/s^2 * DT
+
+
+def test_overshoot_report_covers_wag_lock_on_and_bounce_in_all_three_formats():
+    """The report's rows: finite, the tool stays within 5 cm of its command in every format, and
+    feeding the profile forward (pos+vel+acc) does not track worse than positions only."""
+    rows = dy.overshoot_report(profiles=("default",))
+    assert {(r[0], r[1]) for r in rows} == {(b, f) for b in ("wag", "lock_on", "bounce") for f, _ in dy.FEEDFORWARDS}
+    by = {(r[0], r[1]): r[3] for r in rows}
+    for o in by.values():
+        assert all(np.isfinite(v) for v in o.values()) and o["err_mm"] < 50.0
+    for beat in ("wag", "bounce"):  # lock_on's reach and grip are the task's own, with the container
+        assert by[beat, "pos+vel+acc"]["err_mm"] <= by[beat, "pos only"]["err_mm"] + 1e-6
+    assert "over-travel" in dy.format_overshoot(rows)

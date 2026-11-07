@@ -186,6 +186,48 @@ def test_move_calls_record_impedance_by_keyword_and_position(env):
     assert player.control_mode == IMPEDANCE
 
 
+class ControlDirector(StubDirector):
+    """A stub director that records set_control (and can raise from it)."""
+
+    def __init__(self, raises=None, **kw):
+        super().__init__(**kw)
+        self.controls, self.raises = [], raises
+
+    def set_control(self, mode, gains):
+        if self.raises is not None:
+            raise self.raises
+        self.controls.append((mode, gains))
+
+
+def test_every_move_call_tells_the_director_its_mode_and_gains(env):
+    director = ControlDirector()
+    player, puppy = env.build(director)
+    assert puppy.go_to_joint_config(START, control_mode=IMPEDANCE, gains="soft")
+    assert director.controls == [(IMPEDANCE, "soft")]
+    assert puppy.go_to_joint_config(START)
+    knots = [START + np.array([0, 0, 0, 0, 0, 0, 0.2])]
+    assert puppy.move_joints(knots, impedance=IMPEDANCE_PARAMS)
+    assert director.controls[1] == (POSITION, None)
+    assert director.controls[2] == (IMPEDANCE, {k: IMPEDANCE_PARAMS[k] for k in ("kq", "zeta", "torque_limit")})
+    assert (player.control_mode, player.gains) == director.controls[-1]  # the recorded ones
+
+
+@pytest.mark.parametrize("raises", [RuntimeError("boom"), ValueError("bad gains")])
+def test_a_raising_set_control_never_reaches_the_tasks_move(env, raises):
+    director = ControlDirector(raises=raises, beats=lambda e: [make_beat()] if isinstance(e, AfterMove) else [])
+    player, puppy = env.build(director)
+    assert puppy.go_to_joint_config(START, control_mode=IMPEDANCE, gains="soft")  # the task's own result, untouched
+    assert not player.disabled
+    assert any("set_control failed" in line and type(raises).__name__ in line for line in env.logs)
+    assert [type(e) for e in director.events] == [BeforeMove, AfterMove]  # the events still flowed
+
+
+def test_a_director_without_set_control_is_fine(env):
+    player, puppy = env.build()  # StubDirector has none
+    assert puppy.go_to_joint_config(START)
+    assert not player.disabled
+
+
 def test_moving_arm_skips_the_beat(env):
     player, _ = env.build(real_arm=Arm(env.arm, moving))
     player.play([make_beat()])

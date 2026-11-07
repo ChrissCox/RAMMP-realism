@@ -296,3 +296,57 @@ def test_box_opening_success_is_a_single_proud_under_every_preset(chain, scene, 
     for phase in ("locate", "look", "press", "grip", "carry", "release", "home"):
         assert d.on_event(Phase(phase, "x"), home, False) == []
     assert [b.name for b in d.on_event(Succeeded(), home, False)] == ["proud"]
+
+
+def _still_tail_s(beat):
+    """Seconds the beat stands still at its end posture."""
+    q = np.array([p[1] for p in beat.points])
+    moving = np.flatnonzero(np.abs(q - q[-1]).max(axis=1) > 1e-6)
+    return beat.duration - beat.points[moving[-1] + 1][0] if moving.size else beat.duration
+
+
+def _first_beat(d, q, held):
+    for event in (TaskRequested(), BeforeMove(False), Succeeded()):
+        beats = d.on_event(event, q, held)
+        if beats:
+            return beats[0]
+    raise AssertionError("no beat")
+
+
+@pytest.mark.parametrize(
+    "control, settle",
+    [
+        ((1, "soft"), 2.3),
+        ((1, "default"), 1.1),
+        ((1, "medium"), 1.1),
+        ((1, "stiff"), 0.1),
+        (("impedance", "soft"), 2.3),
+        ((1, None), 2.3),  # gains not known: the longest
+        ((1, {"kq": [80.0] * 7, "zeta": 0.5}), 2.3),  # custom gains: the longest
+        ((7, "stiff"), 2.3),  # a mode it does not know: the longest
+        (("position", None), 0.0),
+        ((0, "soft"), 0.0),
+    ],
+)
+def test_settle_before_precision_while_holding_under_impedance(chain, scene, targets, home, control, settle):
+    base = _still_tail_s(_first_beat(make(chain, scene, targets, seed=3), home, True))
+    d = make(chain, scene, targets, seed=3, control=control)
+    beat = _first_beat(d, home, True)
+    tail = _still_tail_s(beat)
+    assert tail >= settle - 0.03
+    assert tail >= base - 1e-9  # never shorter than the usual tail
+    assert check_beat(beat.points, home, chain, scene, beat.zone, d.caps, held=True) == []
+    if settle <= 0.2:  # position mode or a stiff arm: the beat is the usual one
+        assert abs(tail - base) < 1e-9
+    # not holding: the usual tail whatever the mode
+    free = _first_beat(make(chain, scene, targets, seed=3, control=control), home, False)
+    assert abs(_still_tail_s(free) - _still_tail_s(_first_beat(make(chain, scene, targets, seed=3), home, False))) < 1e-9
+
+
+def test_set_control_changes_the_next_beat_and_is_default_safe(chain, scene, targets, home):
+    d = make(chain, scene, targets, seed=3)
+    assert d.control == ("position", None) and d.settle_s(True) == 0.0
+    d.set_control(1, "soft")
+    assert d.settle_s(True) == 2.3 and d.settle_s(False) == 0.0
+    d.set_control(object(), [])  # unhashable or odd values never raise: the longest
+    assert d.settle_s(True) == 2.3

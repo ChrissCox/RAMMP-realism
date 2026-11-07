@@ -12,7 +12,7 @@ python -m puppy_sim compliance <clips|all>        each beat's legibility as comm
        [--control C ...]                          would execute it (default: position and impedance
                                                   soft/default/stiff), tracking error, PRECISION deviation
 Simulated execution options (render --control, compliance): --positions-only (no velocity and
-acceleration feedforward), --armature A (kg m^2), --friction N (N m, one value or 7 comma-separated),
+acceleration feedforward), --positions-velocities (velocities, no accelerations), --armature A (kg m^2), --friction N (N m, one value or 7 comma-separated),
 --payload KG (a held container).
 """
 
@@ -54,7 +54,8 @@ def _plant(args):
 
 
 def _control(spec, args):
-    return dynamics.control(spec, feedforward=not args.positions_only)
+    ff = dynamics.VELOCITIES if args.positions_velocities else not args.positions_only
+    return dynamics.control(spec, feedforward=ff)
 
 
 def cmd_render(args):
@@ -132,6 +133,11 @@ def main(argv=None):
             p.add_argument("--control", action="append", help="a control to compare (repeatable)")
         if name in ("render", "compliance"):
             p.add_argument("--positions-only", action="store_true", help="no velocity/acceleration feedforward")
+            p.add_argument(
+                "--positions-velocities",
+                action="store_true",
+                help="positions + central-difference velocities, no accelerations (what execute_joint_trajectory sends)",
+            )
             p.add_argument("--armature", type=float, help="joint armature of the simulated arm, kg m^2")
             p.add_argument("--friction", help="Coulomb joint friction, N m: one value or 7 comma-separated")
             p.add_argument("--payload", type=float, help="mass of a held container, kg")
