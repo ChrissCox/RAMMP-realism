@@ -20,6 +20,11 @@ USERS_POSE = np.array([0.0531, 0.1366, -3.1161, -2.3040, -0.6222, 1.3713, 1.7233
 
 
 @pytest.fixture
+def env(tmp_path):  # the engine with the parameter not set at all
+    yield from _env(tmp_path)
+
+
+@pytest.fixture
 def env_cap(tmp_path):
     yield from _env(tmp_path, ATTENDED_FLOOR_CAP_M)
 
@@ -145,4 +150,4 @@ def test_any_other_cap_refuses_every_action_with_bad_config_before_touching_the_
     for goals in env.fake.goals.values():
         assert not goals
     assert not env.cand_file.exists()
-    assert "bad_config" in (env.dir / "playground.jsonl").read_text()
+    assert "stage_floor_cap_m" in (env.dir / "playground.jsonl").read_text()  # logged, with the reason
