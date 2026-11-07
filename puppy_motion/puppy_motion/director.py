@@ -22,9 +22,10 @@ Settle time. Under joint impedance a held container makes the arm spring and set
 beat that ends just before a PRECISION move must leave it still for longer: while the arm holds
 something, the still tail (the hold after its last motion) of a beat played after a move (AfterMove) is at least SETTLE_S for
 the task's control mode and gains (soft 2.3 s, medium/default 1.1 s, stiff 0.1 s), else the usual
-(TAIL_S) tail; the tail is never shorter than TAIL_S. Only an AfterMove beat is followed by a
-possible PRECISION move: beats before a move (TaskRequested, BeforeMove: the move itself lets the
-arm settle) and the ending reactions (Succeeded, Failed: nothing follows) always keep TAIL_S.
+(TAIL_S) tail; the tail is never shorter than TAIL_S. Only a beat after a move (AfterMove) or
+before a move that ends precise (BeforeMove with precise_end: lock_on) is followed by a PRECISION
+move; beats before TaskRequested's or a plain BeforeMove's (non-precise) move and the ending
+reactions (Succeeded, Failed: nothing follows) always keep TAIL_S.
 The mode and gains are those of the task's LAST move call (set_control is called after each move,
 so a beat sees the previous move's control: the settle concerns the move after the beat, which in
 practice runs in the same mode; the deferred TaskRequested beat plays before any move, with the
@@ -408,6 +409,11 @@ class Director:
             self.log.append(f"Phase {event.name!r}: {self._entry.zone.name}")
         return []
 
+    def _settles(self, event_name):
+        """Whether a beat answering this event may be followed by a PRECISION move: after a move, or
+        before one that ends at a precise pose (the approach to the grasp)."""
+        return event_name == "AfterMove" or event_name == "BeforeMove" and self._precise_move
+
     def _decide(self, i, event_name, q_now, held, zone):
         rule = self.rules[i]
         tag = f"{event_name} {rule.beat}"
@@ -422,7 +428,7 @@ class Director:
             self.log.append(f"{tag}: dropped (no budget left after the reserve)")
             return None
         for short in (False, True):
-            beat = self._beat(rule.beat, short, q_now, held, zone, tag, event_name != "AfterMove" or rule.ending is not None)
+            beat = self._beat(rule.beat, short, q_now, held, zone, tag, not self._settles(event_name) or rule.ending is not None)
             if beat is not None and beat.duration <= left + EPS:
                 self.log.append(f"{tag}: {'short' if short else 'full'} {beat.duration:.2f} s ({left:.2f} s free)")
                 return beat

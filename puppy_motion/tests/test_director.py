@@ -377,19 +377,25 @@ def test_beats_before_a_move_keep_the_usual_tail(chain, scene, targets, home):
         assert all(abs(a.duration - u.duration) < 1e-9 for a, u in zip(soft, usual))
 
 
-def test_only_after_move_beats_ask_for_the_settle_tail(chain, scene, targets, home):
-    d = make(chain, scene, targets, control=(1, "soft"))
+def test_only_after_move_and_precise_approach_beats_ask_for_the_settle_tail(chain, scene, targets, home):
     asked = {}
-    real = d._beat
+    for label, events in (
+        ("plain", (TaskRequested(), BeforeMove(False), AfterMove(), Succeeded())),
+        ("precise", (BeforeMove(True),)),
+    ):
+        d = make(chain, scene, targets, control=(1, "soft"))
+        real = d._beat
 
-    def spy(name, short, q, held, zone, tag, usual_tail=False):
-        if tag:
-            asked[tag.split()[0]] = usual_tail
-        return real(name, short, q, held, zone, tag, usual_tail)
+        def spy(name, short, q, held, zone, tag, usual_tail=False, real=real, label=label):
+            if tag:
+                asked[label, tag.split()[0]] = usual_tail
+            return real(name, short, q, held, zone, tag, usual_tail)
 
-    d._beat = spy
-    for e in (TaskRequested(), Phase("view", ""), BeforeMove(False), AfterMove(), Succeeded()):
-        d.on_event(e, home, True)
-    assert asked.get("TaskRequested") and asked.get("Succeeded")
-    assert asked.get("BeforeMove", True)
-    assert asked["AfterMove"] is False
+        d._beat = spy
+        d.on_event(Phase("view", ""), home, True)
+        for e in events:
+            d.on_event(e, home, True)
+    assert asked["plain", "TaskRequested"] is True and asked["plain", "Succeeded"] is True
+    assert asked.get(("plain", "BeforeMove"), True) is True
+    assert asked["plain", "AfterMove"] is False
+    assert asked["precise", "BeforeMove"] is False  # lock_on: the settle tail (it may then be dropped for budget)
